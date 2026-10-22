@@ -1,6 +1,5 @@
 import {
   ButtonItem,
-  DropdownItem,
   PanelSection,
   PanelSectionRow,
   SliderField,
@@ -197,6 +196,19 @@ function GPUFrequencyPanel() {
   };
 
   const supported = state?.supported === true;
+  const availableGovernors = cpuState?.availableGovernors ?? [];
+  const governorToggleSupported = cpuState?.governorSupported === true
+    && availableGovernors.includes("performance")
+    && availableGovernors.includes("powersave");
+  const currentGovernorIsToggleable = cpuState?.currentGovernor === "performance"
+    || cpuState?.currentGovernor === "powersave";
+  const governorToggleDescription = cpuState?.governorMixed
+    ? "当前在线 CPU 策略不一致；开启会统一为 Performance，关闭会统一为 Power Save。"
+    : !governorToggleSupported
+      ? `开关需要同时支持 Performance 和 Power Save；当前可用：${availableGovernors.join(", ") || "无"}`
+      : !currentGovernorIsToggleable
+        ? `当前策略：${cpuState?.currentGovernor ?? "未知"}；切换会统一为 Performance 或 Power Save。`
+        : `当前：${cpuState.currentGovernor === "performance" ? "Performance" : "Power Save"}；开启为 Performance，关闭为 Power Save。`;
   const actualText = !supported
     ? "—"
     : state.actualFreqMhz == null
@@ -343,25 +355,15 @@ function GPUFrequencyPanel() {
               </PanelSectionRow>
               <PanelSectionRow>
                 {cpuState.governorSupported ? (
-                  <DropdownItem
+                  <ToggleField
                     label="CPU 调频策略"
-                    description={cpuState.governorError ?? (cpuState.governorMixed
-                      ? "在线 CPU 策略当前不一致；选择一项可统一设置。"
-                      : "只显示所有在线 CPU 策略共同支持的选项。")}
-                    rgOptions={(cpuState.availableGovernors ?? []).map((governor) => ({
-                      data: governor,
-                      label: governor,
-                    }))}
-                    selectedOption={cpuState.currentGovernor ?? ""}
-                    disabled={busy}
-                    onChange={(option) => {
-                      if (typeof option.data === "string") {
-                        void applyCPUControl(
-                          () => setCPUGovernor(option.data),
-                          `CPU 调频策略已设为 ${option.data}`,
-                        );
-                      }
-                    }}
+                    description={cpuState.governorError ?? governorToggleDescription}
+                    checked={cpuState.currentGovernor === "performance"}
+                    disabled={busy || !governorToggleSupported}
+                    onChange={(enabled) => void applyCPUControl(
+                      () => setCPUGovernor(enabled ? "performance" : "powersave"),
+                      `CPU 调频策略已设为 ${enabled ? "Performance" : "Power Save"}`,
+                    )}
                   />
                 ) : (
                   <div>{cpuState.governorError ?? "当前内核没有提供可统一设置的 CPU 调频策略。"}</div>
