@@ -200,15 +200,15 @@ function GPUFrequencyPanel() {
   const governorToggleSupported = cpuState?.governorSupported === true
     && availableGovernors.includes("performance")
     && availableGovernors.includes("powersave");
-  const currentGovernorIsToggleable = cpuState?.currentGovernor === "performance"
-    || cpuState?.currentGovernor === "powersave";
-  const governorToggleDescription = cpuState?.governorMixed
-    ? "当前在线 CPU 策略不一致；开启会统一为 Performance，关闭会统一为 Power Save。"
-    : !governorToggleSupported
-      ? `开关需要同时支持 Performance 和 Power Save；当前可用：${availableGovernors.join(", ") || "无"}`
-      : !currentGovernorIsToggleable
-        ? `当前策略：${cpuState?.currentGovernor ?? "未知"}；切换会统一为 Performance 或 Power Save。`
-        : `当前：${cpuState.currentGovernor === "performance" ? "Performance" : "Power Save"}；开启为 Performance，关闭为 Power Save。`;
+  const governorToggleDescription = !governorToggleSupported
+    ? "不可用"
+    : cpuState?.governorMixed
+      ? "策略混合"
+      : cpuState?.currentGovernor === "performance"
+        ? "Performance"
+        : cpuState?.currentGovernor === "powersave"
+          ? "Power Save"
+          : cpuState?.currentGovernor ?? "未知";
   const actualText = !supported
     ? "—"
     : state.actualFreqMhz == null
@@ -332,7 +332,9 @@ function GPUFrequencyPanel() {
               <PanelSectionRow>
                 <ToggleField
                   label="CPU Boost（Turbo）"
-                  description={cpuState.cpuBoostError ?? "启用或关闭 Intel CPU Turbo Boost。"}
+                  description={cpuState.cpuBoostSupported
+                    ? (cpuState.cpuBoostEnabled ? "开启" : "关闭")
+                    : "不可用"}
                   checked={cpuState.cpuBoostEnabled ?? false}
                   disabled={busy || !cpuState.cpuBoostSupported || cpuState.cpuBoostEnabled == null}
                   onChange={(enabled) => void applyCPUControl(
@@ -344,7 +346,9 @@ function GPUFrequencyPanel() {
               <PanelSectionRow>
                 <ToggleField
                   label="SMT（超线程）"
-                  description={cpuState.smtError ?? `Linux SMT：${cpuState.smtMode ?? "状态未知"}；在线逻辑 CPU：${cpuState.onlineCPUs ?? "未知"}`}
+                  description={cpuState.smtSupported
+                    ? (cpuState.smtEnabled ? "开启" : "关闭")
+                    : "不可切换"}
                   checked={cpuState.smtEnabled ?? false}
                   disabled={busy || !cpuState.smtSupported || cpuState.smtEnabled == null}
                   onChange={(enabled) => void applyCPUControl(
@@ -366,11 +370,8 @@ function GPUFrequencyPanel() {
                     )}
                   />
                 ) : (
-                  <div>{cpuState.governorError ?? "当前内核没有提供可统一设置的 CPU 调频策略。"}</div>
+                  <div>不可用</div>
                 )}
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <div>控件读取 Linux CPUFreq、Intel pstate 与 SMT sysfs 状态；只在切换开关或选择策略时写入。</div>
               </PanelSectionRow>
             </>
           ) : (
