@@ -1,9 +1,11 @@
 import {
   ButtonItem,
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
   SliderField,
   staticClasses,
+  ToggleField,
 } from "@decky/ui";
 import { callable, definePlugin } from "@decky/api";
 import { useEffect, useRef, useState } from "react";
@@ -38,11 +40,33 @@ type PackagePowerState = {
   maxTdpW?: number;
 };
 
+type CPUControlState = {
+  supported: boolean;
+  error?: string;
+  cpuBoostSupported?: boolean;
+  cpuBoostEnabled?: boolean | null;
+  cpuBoostError?: string | null;
+  smtSupported?: boolean;
+  smtEnabled?: boolean | null;
+  smtMode?: string | null;
+  smtError?: string | null;
+  onlineCPUs?: string;
+  governorSupported?: boolean;
+  currentGovernor?: string | null;
+  availableGovernors?: string[];
+  governorMixed?: boolean;
+  governorError?: string;
+};
+
 const getGPUState = callable<[], GPUState>("get_gpu_state");
 const setGPUFrequency = callable<[frequencyMhz: number], GPUState>("set_gpu_frequency");
 const restoreAutomatic = callable<[], GPUState>("restore_gpu_automatic");
 const getPackagePowerState = callable<[], PackagePowerState>("get_package_power_state");
 const setPackageTDP = callable<[powerWatts: number], PackagePowerState>("set_package_tdp");
+const getCPUControlState = callable<[], CPUControlState>("get_cpu_control_state");
+const setCPUBoost = callable<[enabled: boolean], CPUControlState>("set_cpu_boost");
+const setSMT = callable<[enabled: boolean], CPUControlState>("set_smt");
+const setCPUGovernor = callable<[governor: string], CPUControlState>("set_cpu_governor");
 const THROTTLE_LABELS: Record<string, string> = {
   pl1: "整机封装功耗限制（PL1）",
   pl2: "短时封装功耗限制（PL2）",
@@ -57,6 +81,7 @@ const THROTTLE_LABELS: Record<string, string> = {
 function GPUFrequencyPanel() {
   const [state, setState] = useState<GPUState | null>(null);
   const [powerState, setPowerState] = useState<PackagePowerState | null>(null);
+  const [cpuState, setCPUState] = useState<CPUControlState | null>(null);
   const [targetMhz, setTargetMhz] = useState<number | null>(null);
   const [targetTdpW, setTargetTdpW] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
@@ -67,9 +92,10 @@ function GPUFrequencyPanel() {
   useEffect(() => {
     let mounted = true;
     const refresh = async () => {
-      const [gpuResult, powerResult] = await Promise.allSettled([
+      const [gpuResult, powerResult, cpuResult] = await Promise.allSettled([
         getGPUState(),
         getPackagePowerState(),
+        getCPUControlState(),
       ]);
       if (!mounted) return;
 
@@ -98,6 +124,13 @@ function GPUFrequencyPanel() {
       } else {
         const error = powerResult.reason;
         setPowerState({ supported: false, error: error instanceof Error ? error.message : String(error) });
+      }
+
+      if (cpuResult.status === "fulfilled") {
+        setCPUState(cpuResult.value);
+      } else {
+        const error = cpuResult.reason;
+        setCPUState({ supported: false, error: error instanceof Error ? error.message : String(error) });
       }
     };
 
@@ -139,6 +172,23 @@ function GPUFrequencyPanel() {
       setPowerState(next);
       setTargetTdpW(next.currentTdpW ?? targetTdpW);
       setMessage(`MSR + MMIO 的 PL1/PL2 已同步为 ${next.currentTdpW ?? targetTdpW} W`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyCPUControl = async (
+    action: () => Promise<CPUControlState>,
+    successMessage: string,
+  ) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const next = await action();
+      setCPUState(next);
+      setMessage(successMessage);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -259,6 +309,71 @@ function GPUFrequencyPanel() {
           ) : (
             <PanelSectionRow>
               <div>{powerState?.error ?? "正在读取 MSR / MMIO RAPL 功耗状态…"}</div>
+            </PanelSectionRow>
+          )}
+
+          <PanelSectionRow>
+            <div className={staticClasses.PanelSectionTitle}>CPU Controls</div>
+          </PanelSectionRow>
+          {cpuState?.supported ? (
+            <>
+              <PanelSectionRow>
+                <ToggleField
+                  label="CPU Boost（Turbo）"
+                  description={cpuState.cpuBoostError ?? "启用或关闭 Intel CPU Turbo Boost。"}
+                  checked={cpuState.cpuBoostEnabled ?? false}
+                  disabled={busy || !cpuState.cpuBoostSupported || cpuState.cpuBoostEnabled == null}
+                  onChange={(enabled) => void applyCPUControl(
+                    () => setCPUBoost(enabled),
+                    enabled ? "已启用 CPU Boost" : "已关闭 CPU Boost",
+                  )}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ToggleField
+                  label="SMT（超线程）"
+                  description={cpuState.smtError ?? `Linux SMT：${cpuState.smtMode ?? "状态未知"}；在线逻辑 CPU：${cpuState.onlineCPUs ?? "未知"}`}
+                  checked={cpuState.smtEnabled ?? false}
+                  disabled={busy || !cpuState.smtSupported || cpuState.smtEnabled == null}
+                  onChange={(enabled) => void applyCPUControl(
+                    () => setSMT(enabled),
+                    enabled ? "已启用 SMT（超线程）" : "已关闭 SMT（超线程）",
+                  )}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                {cpuState.governorSupported ? (
+                  <DropdownItem
+                    label="CPU 调频策略"
+                    description={cpuState.governorError ?? (cpuState.governorMixed
+                      ? "在线 CPU 策略当前不一致；选择一项可统一设置。"
+                      : "只显示所有在线 CPU 策略共同支持的选项。")}
+                    rgOptions={(cpuState.availableGovernors ?? []).map((governor) => ({
+                      data: governor,
+                      label: governor,
+                    }))}
+                    selectedOption={cpuState.currentGovernor ?? ""}
+                    disabled={busy}
+                    onChange={(option) => {
+                      if (typeof option.data === "string") {
+                        void applyCPUControl(
+                          () => setCPUGovernor(option.data),
+                          `CPU 调频策略已设为 ${option.data}`,
+                        );
+                      }
+                    }}
+                  />
+                ) : (
+                  <div>{cpuState.governorError ?? "当前内核没有提供可统一设置的 CPU 调频策略。"}</div>
+                )}
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <div>控件读取 Linux CPUFreq、Intel pstate 与 SMT sysfs 状态；只在切换开关或选择策略时写入。</div>
+              </PanelSectionRow>
+            </>
+          ) : (
+            <PanelSectionRow>
+              <div>{cpuState?.error ?? "正在读取 Claw CPU 控制状态…"}</div>
             </PanelSectionRow>
           )}
         </>

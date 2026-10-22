@@ -4,8 +4,8 @@
   "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["claw", "gpu", "frequency"],
-    "description": "GPU frequency and unified MSR/MMIO package TDP control for MSI Claw A1M."
+    "tags": ["claw", "gpu", "cpu", "frequency"],
+    "description": "GPU frequency, CPU controls, and unified MSR/MMIO package TDP control for MSI Claw A1M."
   },
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

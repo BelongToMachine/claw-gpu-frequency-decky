@@ -7,6 +7,14 @@ if PLUGIN_DIR not in sys.path:
 
 import decky_plugin
 
+from cpu_control import (
+    CPUControlError,
+    get_cpu_control_state as read_cpu_control_state,
+    set_cpu_boost,
+    set_cpu_governor,
+    set_smt,
+)
+
 from gpu_control import (
     GPUFrequencyError,
     get_gpu_state,
@@ -18,6 +26,21 @@ from gpu_control import (
 
 
 class Plugin:
+    async def get_cpu_control_state(self):
+        try:
+            return read_cpu_control_state()
+        except CPUControlError as exc:
+            return {"supported": False, "error": str(exc)}
+
+    async def set_cpu_boost(self, enabled: bool):
+        return set_cpu_boost(enabled)
+
+    async def set_smt(self, enabled: bool):
+        return set_smt(enabled)
+
+    async def set_cpu_governor(self, governor: str):
+        return set_cpu_governor(governor)
+
     async def get_gpu_state(self):
         try:
             return get_gpu_state()
