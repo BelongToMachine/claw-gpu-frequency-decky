@@ -85,6 +85,8 @@ function FaMicrochip (props) {
 const getGPUState = callable("get_gpu_state");
 const setGPUFrequency = callable("set_gpu_frequency");
 const restoreAutomatic = callable("restore_gpu_automatic");
+const getPackagePowerState = callable("get_package_power_state");
+const setPackagePL1 = callable("set_package_pl1");
 const THROTTLE_LABELS = {
     pl1: "整机封装功耗限制（PL1）",
     pl2: "短时封装功耗限制（PL2）",
@@ -97,17 +99,24 @@ const THROTTLE_LABELS = {
 };
 function GPUFrequencyPanel() {
     const [state, setState] = SP_REACT.useState(null);
+    const [powerState, setPowerState] = SP_REACT.useState(null);
     const [targetMhz, setTargetMhz] = SP_REACT.useState(null);
+    const [targetPl1W, setTargetPl1W] = SP_REACT.useState(null);
     const [busy, setBusy] = SP_REACT.useState(false);
     const [message, setMessage] = SP_REACT.useState("");
     const targetInitialized = SP_REACT.useRef(false);
+    const powerTargetInitialized = SP_REACT.useRef(false);
     SP_REACT.useEffect(() => {
         let mounted = true;
         const refresh = async () => {
-            try {
-                const next = await getGPUState();
-                if (!mounted)
-                    return;
+            const [gpuResult, powerResult] = await Promise.allSettled([
+                getGPUState(),
+                getPackagePowerState(),
+            ]);
+            if (!mounted)
+                return;
+            if (gpuResult.status === "fulfilled") {
+                const next = gpuResult.value;
                 setState(next);
                 if (next.supported && !targetInitialized.current) {
                     const initial = next.minFreqMhz === next.maxFreqMhz
@@ -117,10 +126,21 @@ function GPUFrequencyPanel() {
                     targetInitialized.current = true;
                 }
             }
-            catch (error) {
-                if (mounted) {
-                    setState({ supported: false, error: error instanceof Error ? error.message : String(error) });
+            else {
+                const error = gpuResult.reason;
+                setState({ supported: false, error: error instanceof Error ? error.message : String(error) });
+            }
+            if (powerResult.status === "fulfilled") {
+                const next = powerResult.value;
+                setPowerState(next);
+                if (next.supported && !powerTargetInitialized.current) {
+                    setTargetPl1W(next.currentPl1W ?? next.minPl1W ?? 5);
+                    powerTargetInitialized.current = true;
                 }
+            }
+            else {
+                const error = powerResult.reason;
+                setPowerState({ supported: false, error: error instanceof Error ? error.message : String(error) });
             }
         };
         void refresh();
@@ -152,6 +172,24 @@ function GPUFrequencyPanel() {
             setBusy(false);
         }
     };
+    const applyPackagePL1 = async () => {
+        if (targetPl1W == null)
+            return;
+        setBusy(true);
+        setMessage("");
+        try {
+            const next = await setPackagePL1(targetPl1W);
+            setPowerState(next);
+            setTargetPl1W(next.currentPl1W ?? targetPl1W);
+            setMessage(`MSR PL1 已设为 ${next.currentPl1W ?? targetPl1W} W`);
+        }
+        catch (error) {
+            setMessage(error instanceof Error ? error.message : String(error));
+        }
+        finally {
+            setBusy(false);
+        }
+    };
     const supported = state?.supported === true;
     const actualText = !supported
         ? "—"
@@ -160,7 +198,7 @@ function GPUFrequencyPanel() {
             : `${state.actualFreqMhz} MHz`;
     return (SP_JSX.jsxs(DFL.PanelSection, { title: "GPU Frequency", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { className: DFL.staticClasses.PanelSectionTitle, children: ["GPU \u5B9E\u9645\u9891\u7387\uFF1A", actualText] }) }), supported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u9891\u7387\u9650\u5236\uFF1A", state.minFreqMhz, "\u2013", state.maxFreqMhz, " MHz \u00B7 Boost\uFF1A", state.boostFreqMhz, " MHz"] }) }), (state.requestedFreqMhz != null || state.firmwareRequestedFreqMhz != null) && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u9A71\u52A8\u8BF7\u6C42\uFF1A", state.requestedFreqMhz ?? "—", " MHz \u00B7 \u56FA\u4EF6\u8BF7\u6C42\uFF1A", state.firmwareRequestedFreqMhz ?? "—", " MHz"] }) })), state.throttled && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u56FA\u4EF6\u9650\u9891\uFF1A", state.throttleReasons?.length
                                     ? state.throttleReasons.map((reason) => THROTTLE_LABELS[reason] ?? reason).join("、")
-                                    : "生效（原因暂不可读）"] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "\u76EE\u6807\u9891\u7387", description: `硬件范围 ${state.hwMinFreqMhz}–${state.hwMaxFreqMhz} MHz；调整后点“应用 GPU 频率”才写入驱动`, min: state.hwMinFreqMhz ?? 0, max: state.hwMaxFreqMhz ?? 0, step: state.stepMhz ?? 50, value: targetMhz ?? state.maxFreqMhz ?? 0, showValue: true, valueSuffix: " MHz", disabled: busy, onChange: (value) => setTargetMhz(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || targetMhz == null, onClick: () => targetMhz != null && void apply(() => setGPUFrequency(targetMhz), `已请求固定到 ${targetMhz} MHz`), children: "\u5E94\u7528 GPU \u9891\u7387" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: () => void apply(restoreAutomatic, "已恢复自动频率范围"), children: "\u6062\u590D\u81EA\u52A8\u9891\u7387" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "\u63D2\u4EF6\u53EA\u8BF7\u6C42 GPU \u9891\u7387\uFF1B\u6574\u673A\u529F\u8017\u6216\u6E29\u5EA6\u9650\u9891\u7531\u56FA\u4EF6\u63A7\u5236\uFF0C\u5B9E\u9645\u9891\u7387\u53EF\u80FD\u4F4E\u4E8E\u8BF7\u6C42\u503C\u3002" }) })] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: state?.error ?? "正在读取 Claw GPU 状态…" }) })), message && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: message }) }))] }));
+                                    : "生效（原因暂不可读）"] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "\u76EE\u6807\u9891\u7387", description: `硬件范围 ${state.hwMinFreqMhz}–${state.hwMaxFreqMhz} MHz；调整后点“应用 GPU 频率”才写入驱动`, min: state.hwMinFreqMhz ?? 0, max: state.hwMaxFreqMhz ?? 0, step: state.stepMhz ?? 50, value: targetMhz ?? state.maxFreqMhz ?? 0, showValue: true, valueSuffix: " MHz", disabled: busy, onChange: (value) => setTargetMhz(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || targetMhz == null, onClick: () => targetMhz != null && void apply(() => setGPUFrequency(targetMhz), `已请求固定到 ${targetMhz} MHz`), children: "\u5E94\u7528 GPU \u9891\u7387" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: () => void apply(restoreAutomatic, "已恢复自动频率范围"), children: "\u6062\u590D\u81EA\u52A8\u9891\u7387" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "\u63D2\u4EF6\u53EA\u8BF7\u6C42 GPU \u9891\u7387\uFF1B\u6574\u673A\u529F\u8017\u6216\u6E29\u5EA6\u9650\u9891\u7531\u56FA\u4EF6\u63A7\u5236\uFF0C\u5B9E\u9645\u9891\u7387\u53EF\u80FD\u4F4E\u4E8E\u8BF7\u6C42\u503C\u3002" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { className: DFL.staticClasses.PanelSectionTitle, children: "\u6574\u673A\u529F\u8017\u9650\u5236\uFF08MSR\uFF09" }) }), powerState?.supported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u5F53\u524D PL1 \u957F\u671F\u529F\u8017\u4E0A\u9650\uFF1A", powerState.currentPl1W, " W \u00B7 \u786C\u4EF6\u4E0A\u9650\uFF1A", powerState.maxPl1W, " W"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "\u6574\u673A PL1 \u4E0A\u9650", description: `范围 ${powerState.minPl1W}–${powerState.maxPl1W} W；调整后点“应用 PL1 功耗”才写入 MSR`, min: powerState.minPl1W ?? 5, max: powerState.maxPl1W ?? 28, step: 1, value: targetPl1W ?? powerState.currentPl1W ?? powerState.minPl1W ?? 5, showValue: true, valueSuffix: " W", disabled: busy, onChange: (value) => setTargetPl1W(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || targetPl1W == null, onClick: () => void applyPackagePL1(), children: "\u5E94\u7528 PL1 \u529F\u8017" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "\u6B64\u9879\u53EA\u8BBE\u7F6E CPU \u4E0E GPU \u5171\u7528\u7684\u957F\u671F PL1 \u4E0A\u9650\uFF1B\u4E0D\u4FEE\u6539 MMIO\u3001PL2 \u6216 GPU \u9891\u7387\u3002" }) })] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: powerState?.error ?? "正在读取 MSR RAPL 功耗状态…" }) }))] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: state?.error ?? "正在读取 Claw GPU 状态…" }) })), message && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: message }) }))] }));
 }
 var index = definePlugin(() => ({
     name: "Claw GPU Frequency",

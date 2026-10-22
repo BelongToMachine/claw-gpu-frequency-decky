@@ -10,6 +10,11 @@ PRODUCT_NAME = "Claw A1M"
 SYSTEM_VENDOR = "Micro-Star International Co., Ltd."
 INTEL_VENDOR_ID = "0x8086"
 FREQUENCY_STEP_MHZ = 50
+SYS_VENDOR_PATH = Path("/sys/class/dmi/id/sys_vendor")
+PRODUCT_NAME_PATH = Path("/sys/class/dmi/id/product_name")
+MSR_RAPL_PACKAGE_PATH = Path("/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0")
+PL1_MIN_WATTS = 5
+MICROWATTS_PER_WATT = 1_000_000
 THROTTLE_REASON_NODES = (
     ("pl1", "throttle_reason_pl1"),
     ("pl2", "throttle_reason_pl2"),
@@ -23,7 +28,7 @@ THROTTLE_REASON_NODES = (
 
 
 class GPUFrequencyError(RuntimeError):
-    """Raised when the expected Claw GPU interface is unavailable or rejects a change."""
+    """Raised when a Claw GPU or package power interface is unavailable or rejects a change."""
 
 
 def _read_text(path: Path) -> str:
@@ -153,6 +158,94 @@ def get_gpu_state() -> Dict[str, object]:
         raise
     except OSError as exc:
         raise GPUFrequencyError(f"Cannot access the GPU frequency interface: {exc}") from exc
+
+
+def _ensure_supported_power_device() -> None:
+    vendor = _read_text(SYS_VENDOR_PATH)
+    product = _read_text(PRODUCT_NAME_PATH)
+    if vendor != SYSTEM_VENDOR or product != PRODUCT_NAME:
+        raise GPUFrequencyError(
+            f"Unsupported device ({vendor} {product}); package PL1 control only supports MSI Claw A1M."
+        )
+
+
+def _read_package_power_state() -> Dict[str, object]:
+    _ensure_supported_power_device()
+    limit_path = MSR_RAPL_PACKAGE_PATH / "constraint_0_power_limit_uw"
+    max_path = MSR_RAPL_PACKAGE_PATH / "constraint_0_max_power_uw"
+    if not limit_path.exists() or not max_path.exists():
+        raise GPUFrequencyError(
+            f"MSR RAPL package PL1 interface is unavailable under {MSR_RAPL_PACKAGE_PATH}."
+        )
+
+    current_uw = _read_int(limit_path)
+    max_uw = _read_int(max_path)
+    max_watts = max_uw // MICROWATTS_PER_WATT
+    if current_uw <= 0 or max_watts < PL1_MIN_WATTS:
+        raise GPUFrequencyError(
+            f"Invalid MSR RAPL PL1 values: current {current_uw} µW, maximum {max_uw} µW."
+        )
+
+    return {
+        "supported": True,
+        "device": PRODUCT_NAME,
+        "interface": "MSR RAPL",
+        "currentPl1W": int(round(current_uw / MICROWATTS_PER_WATT)),
+        "minPl1W": PL1_MIN_WATTS,
+        "maxPl1W": max_watts,
+    }
+
+
+def get_package_power_state() -> Dict[str, object]:
+    """Read the package long-term PL1 limit through the MSR-backed RAPL interface."""
+    try:
+        return _read_package_power_state()
+    except GPUFrequencyError:
+        raise
+    except OSError as exc:
+        raise GPUFrequencyError(f"Cannot access the MSR RAPL package power interface: {exc}") from exc
+
+
+def set_package_pl1(power_watts: int) -> Dict[str, object]:
+    """Set only the package long-term PL1 limit through MSR-backed RAPL."""
+    if isinstance(power_watts, bool) or not isinstance(power_watts, int):
+        raise GPUFrequencyError("PL1 power must be an integer watt value.")
+
+    state = get_package_power_state()
+    minimum = int(state["minPl1W"])
+    maximum = int(state["maxPl1W"])
+    if power_watts < minimum or power_watts > maximum:
+        raise GPUFrequencyError(
+            f"PL1 power {power_watts} W is outside the supported range {minimum}–{maximum} W."
+        )
+
+    limit_path = MSR_RAPL_PACKAGE_PATH / "constraint_0_power_limit_uw"
+    old_limit_uw = _read_int(limit_path)
+    requested_uw = power_watts * MICROWATTS_PER_WATT
+    try:
+        limit_path.write_text(f"{requested_uw}\n", encoding="ascii")
+    except OSError as exc:
+        raise GPUFrequencyError(f"Could not write {power_watts} W to MSR RAPL PL1: {exc}") from exc
+
+    try:
+        applied_uw = _read_int(limit_path)
+    except GPUFrequencyError as exc:
+        raise GPUFrequencyError(
+            f"Could not verify the MSR RAPL PL1 write for {power_watts} W: {exc}"
+        ) from exc
+    if applied_uw != requested_uw:
+        rollback_message = ""
+        try:
+            limit_path.write_text(f"{old_limit_uw}\n", encoding="ascii")
+            rollback_message = " The previous PL1 limit was restored."
+        except OSError as rollback_exc:
+            rollback_message = f" Restoring the previous PL1 limit also failed: {rollback_exc}."
+        raise GPUFrequencyError(
+            f"MSR RAPL read back {applied_uw} µW after requesting {requested_uw} µW."
+            f"{rollback_message}"
+        )
+
+    return get_package_power_state()
 
 
 def _write_frequency(gt0: Path, key: str, value: int) -> None:

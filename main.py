@@ -10,7 +10,9 @@ import decky_plugin
 from gpu_control import (
     GPUFrequencyError,
     get_gpu_state,
+    get_package_power_state as read_package_power_state,
     restore_automatic_frequency,
+    set_package_pl1,
     set_fixed_frequency,
 )
 
@@ -27,6 +29,15 @@ class Plugin:
 
     async def restore_gpu_automatic(self):
         return restore_automatic_frequency()
+
+    async def get_package_power_state(self):
+        try:
+            return read_package_power_state()
+        except GPUFrequencyError as exc:
+            return {"supported": False, "error": str(exc)}
+
+    async def set_package_pl1(self, power_watts: int):
+        return set_package_pl1(power_watts)
 
     async def _main(self):
         decky_plugin.logger.info("Claw GPU Frequency loaded; no hardware values changed.")

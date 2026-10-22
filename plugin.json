@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["claw", "gpu", "frequency"],
-    "description": "GPU frequency control for MSI Claw A1M."
+    "description": "GPU frequency and MSR package PL1 power control for MSI Claw A1M."
   },
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
