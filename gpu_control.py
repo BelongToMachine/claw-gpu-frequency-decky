@@ -13,7 +13,8 @@ FREQUENCY_STEP_MHZ = 50
 SYS_VENDOR_PATH = Path("/sys/class/dmi/id/sys_vendor")
 PRODUCT_NAME_PATH = Path("/sys/class/dmi/id/product_name")
 MSR_RAPL_PACKAGE_PATH = Path("/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0")
-PL1_MIN_WATTS = 5
+MMIO_RAPL_PACKAGE_PATH = Path("/sys/devices/virtual/powercap/intel-rapl-mmio/intel-rapl-mmio:0")
+TDP_MIN_WATTS = 5
 MICROWATTS_PER_WATT = 1_000_000
 THROTTLE_REASON_NODES = (
     ("pl1", "throttle_reason_pl1"),
@@ -171,81 +172,119 @@ def _ensure_supported_power_device() -> None:
 
 def _read_package_power_state() -> Dict[str, object]:
     _ensure_supported_power_device()
-    limit_path = MSR_RAPL_PACKAGE_PATH / "constraint_0_power_limit_uw"
-    max_path = MSR_RAPL_PACKAGE_PATH / "constraint_0_max_power_uw"
-    if not limit_path.exists() or not max_path.exists():
-        raise GPUFrequencyError(
-            f"MSR RAPL package PL1 interface is unavailable under {MSR_RAPL_PACKAGE_PATH}."
-        )
+    packages = (
+        ("MSR", MSR_RAPL_PACKAGE_PATH),
+        ("MMIO", MMIO_RAPL_PACKAGE_PATH),
+    )
+    current_limits: List[int] = []
+    hardware_maxima: List[int] = []
+    for interface, package in packages:
+        for constraint, short_name in ((0, "PL1"), (1, "PL2")):
+            limit_path = package / f"constraint_{constraint}_power_limit_uw"
+            if not limit_path.exists():
+                raise GPUFrequencyError(
+                    f"{interface} RAPL package {short_name} interface is unavailable at {limit_path}."
+                )
+            current_uw = _read_int(limit_path)
+            if current_uw <= 0:
+                raise GPUFrequencyError(
+                    f"Invalid {interface} RAPL {short_name} value: {current_uw} µW."
+                )
+            current_limits.append(current_uw)
 
-    current_uw = _read_int(limit_path)
-    max_uw = _read_int(max_path)
+            max_path = package / f"constraint_{constraint}_max_power_uw"
+            if max_path.exists():
+                maximum = _read_int(max_path)
+                if maximum > 0:
+                    hardware_maxima.append(maximum)
+
+    # Some kernels report zero for PL2's maximum. The PL1 maximum is the
+    # package capability shared by both constraints on this device.
+    if not hardware_maxima:
+        raise GPUFrequencyError("The device did not report a supported RAPL package power maximum.")
+    current_uw = min(current_limits)
+    max_uw = min(hardware_maxima)
     max_watts = max_uw // MICROWATTS_PER_WATT
-    if current_uw <= 0 or max_watts < PL1_MIN_WATTS:
+    if max_watts < TDP_MIN_WATTS:
         raise GPUFrequencyError(
-            f"Invalid MSR RAPL PL1 values: current {current_uw} µW, maximum {max_uw} µW."
+            f"Invalid RAPL package values: effective limit {current_uw} µW, maximum {max_uw} µW."
         )
 
     return {
         "supported": True,
         "device": PRODUCT_NAME,
-        "interface": "MSR RAPL",
-        "currentPl1W": int(round(current_uw / MICROWATTS_PER_WATT)),
-        "minPl1W": PL1_MIN_WATTS,
-        "maxPl1W": max_watts,
+        "interface": "MSR + MMIO RAPL",
+        "currentTdpW": int(round(current_uw / MICROWATTS_PER_WATT)),
+        "minTdpW": TDP_MIN_WATTS,
+        "maxTdpW": max_watts,
     }
 
 
 def get_package_power_state() -> Dict[str, object]:
-    """Read the package long-term PL1 limit through the MSR-backed RAPL interface."""
+    """Read the lowest active package limit across MSR and MMIO RAPL."""
     try:
         return _read_package_power_state()
     except GPUFrequencyError:
         raise
     except OSError as exc:
-        raise GPUFrequencyError(f"Cannot access the MSR RAPL package power interface: {exc}") from exc
+        raise GPUFrequencyError(f"Cannot access the MSR/MMIO RAPL package power interfaces: {exc}") from exc
 
 
-def set_package_pl1(power_watts: int) -> Dict[str, object]:
-    """Set only the package long-term PL1 limit through MSR-backed RAPL."""
+def _package_power_limit_paths() -> List[Tuple[str, Path]]:
+    return [
+        ("MSR PL1", MSR_RAPL_PACKAGE_PATH / "constraint_0_power_limit_uw"),
+        ("MSR PL2", MSR_RAPL_PACKAGE_PATH / "constraint_1_power_limit_uw"),
+        ("MMIO PL1", MMIO_RAPL_PACKAGE_PATH / "constraint_0_power_limit_uw"),
+        ("MMIO PL2", MMIO_RAPL_PACKAGE_PATH / "constraint_1_power_limit_uw"),
+    ]
+
+
+def set_package_tdp(power_watts: int) -> Dict[str, object]:
+    """Apply one package TDP to PL1 and PL2 through both MSR and MMIO RAPL."""
     if isinstance(power_watts, bool) or not isinstance(power_watts, int):
-        raise GPUFrequencyError("PL1 power must be an integer watt value.")
+        raise GPUFrequencyError("TDP must be an integer watt value.")
 
     state = get_package_power_state()
-    minimum = int(state["minPl1W"])
-    maximum = int(state["maxPl1W"])
+    minimum = int(state["minTdpW"])
+    maximum = int(state["maxTdpW"])
     if power_watts < minimum or power_watts > maximum:
         raise GPUFrequencyError(
-            f"PL1 power {power_watts} W is outside the supported range {minimum}–{maximum} W."
+            f"TDP {power_watts} W is outside the supported range {minimum}–{maximum} W."
         )
 
-    limit_path = MSR_RAPL_PACKAGE_PATH / "constraint_0_power_limit_uw"
-    old_limit_uw = _read_int(limit_path)
     requested_uw = power_watts * MICROWATTS_PER_WATT
+    previous = [(name, path, _read_int(path)) for name, path in _package_power_limit_paths()]
+    attempted: List[Tuple[str, Path, int]] = []
     try:
-        limit_path.write_text(f"{requested_uw}\n", encoding="ascii")
-    except OSError as exc:
-        raise GPUFrequencyError(f"Could not write {power_watts} W to MSR RAPL PL1: {exc}") from exc
-
-    try:
-        applied_uw = _read_int(limit_path)
-    except GPUFrequencyError as exc:
-        raise GPUFrequencyError(
-            f"Could not verify the MSR RAPL PL1 write for {power_watts} W: {exc}"
-        ) from exc
-    if applied_uw != requested_uw:
-        rollback_message = ""
-        try:
-            limit_path.write_text(f"{old_limit_uw}\n", encoding="ascii")
-            rollback_message = " The previous PL1 limit was restored."
-        except OSError as rollback_exc:
-            rollback_message = f" Restoring the previous PL1 limit also failed: {rollback_exc}."
-        raise GPUFrequencyError(
-            f"MSR RAPL read back {applied_uw} µW after requesting {requested_uw} µW."
-            f"{rollback_message}"
+        for entry in previous:
+            name, path, _old_value = entry
+            attempted.append(entry)
+            try:
+                path.write_text(f"{requested_uw}\n", encoding="ascii")
+            except OSError as exc:
+                raise GPUFrequencyError(f"Could not write {power_watts} W to {name}: {exc}") from exc
+            applied_uw = _read_int(path)
+            if applied_uw != requested_uw:
+                raise GPUFrequencyError(
+                    f"{name} read back {applied_uw} µW after requesting {requested_uw} µW."
+                )
+        return get_package_power_state()
+    except Exception as exc:
+        rollback_errors: List[str] = []
+        for name, path, old_value in reversed(attempted):
+            try:
+                path.write_text(f"{old_value}\n", encoding="ascii")
+                restored_uw = _read_int(path)
+                if restored_uw != old_value:
+                    raise GPUFrequencyError(f"read back {restored_uw} µW")
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{name} restore failed: {rollback_exc}")
+        rollback_message = (
+            " Previous values were restored."
+            if not rollback_errors
+            else " " + "; ".join(rollback_errors)
         )
-
-    return get_package_power_state()
+        raise GPUFrequencyError(f"Could not apply unified TDP: {exc}.{rollback_message}") from exc
 
 
 def _write_frequency(gt0: Path, key: str, value: int) -> None:

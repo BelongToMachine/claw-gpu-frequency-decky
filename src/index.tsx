@@ -33,16 +33,16 @@ type PackagePowerState = {
   supported: boolean;
   error?: string;
   interface?: string;
-  currentPl1W?: number;
-  minPl1W?: number;
-  maxPl1W?: number;
+  currentTdpW?: number;
+  minTdpW?: number;
+  maxTdpW?: number;
 };
 
 const getGPUState = callable<[], GPUState>("get_gpu_state");
 const setGPUFrequency = callable<[frequencyMhz: number], GPUState>("set_gpu_frequency");
 const restoreAutomatic = callable<[], GPUState>("restore_gpu_automatic");
 const getPackagePowerState = callable<[], PackagePowerState>("get_package_power_state");
-const setPackagePL1 = callable<[powerWatts: number], PackagePowerState>("set_package_pl1");
+const setPackageTDP = callable<[powerWatts: number], PackagePowerState>("set_package_tdp");
 const THROTTLE_LABELS: Record<string, string> = {
   pl1: "整机封装功耗限制（PL1）",
   pl2: "短时封装功耗限制（PL2）",
@@ -58,7 +58,7 @@ function GPUFrequencyPanel() {
   const [state, setState] = useState<GPUState | null>(null);
   const [powerState, setPowerState] = useState<PackagePowerState | null>(null);
   const [targetMhz, setTargetMhz] = useState<number | null>(null);
-  const [targetPl1W, setTargetPl1W] = useState<number | null>(null);
+  const [targetTdpW, setTargetTdpW] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const targetInitialized = useRef(false);
@@ -92,7 +92,7 @@ function GPUFrequencyPanel() {
         const next = powerResult.value;
         setPowerState(next);
         if (next.supported && !powerTargetInitialized.current) {
-          setTargetPl1W(next.currentPl1W ?? next.minPl1W ?? 5);
+          setTargetTdpW(next.currentTdpW ?? next.minTdpW ?? 5);
           powerTargetInitialized.current = true;
         }
       } else {
@@ -130,15 +130,15 @@ function GPUFrequencyPanel() {
     }
   };
 
-  const applyPackagePL1 = async () => {
-    if (targetPl1W == null) return;
+  const applyPackageTDP = async () => {
+    if (targetTdpW == null) return;
     setBusy(true);
     setMessage("");
     try {
-      const next = await setPackagePL1(targetPl1W);
+      const next = await setPackageTDP(targetTdpW);
       setPowerState(next);
-      setTargetPl1W(next.currentPl1W ?? targetPl1W);
-      setMessage(`MSR PL1 已设为 ${next.currentPl1W ?? targetPl1W} W`);
+      setTargetTdpW(next.currentTdpW ?? targetTdpW);
+      setMessage(`MSR + MMIO 的 PL1/PL2 已同步为 ${next.currentTdpW ?? targetTdpW} W`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -222,43 +222,43 @@ function GPUFrequencyPanel() {
           </PanelSectionRow>
 
           <PanelSectionRow>
-            <div className={staticClasses.PanelSectionTitle}>整机功耗限制（MSR）</div>
+            <div className={staticClasses.PanelSectionTitle}>整机 TDP（MSR + MMIO）</div>
           </PanelSectionRow>
           {powerState?.supported ? (
             <>
               <PanelSectionRow>
-                <div>当前 PL1 长期功耗上限：{powerState.currentPl1W} W · 硬件上限：{powerState.maxPl1W} W</div>
+                <div>当前有效整机上限：{powerState.currentTdpW} W · 硬件上限：{powerState.maxTdpW} W</div>
               </PanelSectionRow>
               <PanelSectionRow>
                 <SliderField
-                  label="整机 PL1 上限"
-                  description={`范围 ${powerState.minPl1W}–${powerState.maxPl1W} W；调整后点“应用 PL1 功耗”才写入 MSR`}
-                  min={powerState.minPl1W ?? 5}
-                  max={powerState.maxPl1W ?? 28}
+                  label="整机 TDP"
+                  description={`范围 ${powerState.minTdpW}–${powerState.maxTdpW} W；应用后同步设置 MSR 与 MMIO 的 PL1、PL2`}
+                  min={powerState.minTdpW ?? 5}
+                  max={powerState.maxTdpW ?? 28}
                   step={1}
-                  value={targetPl1W ?? powerState.currentPl1W ?? powerState.minPl1W ?? 5}
+                  value={targetTdpW ?? powerState.currentTdpW ?? powerState.minTdpW ?? 5}
                   showValue
                   valueSuffix=" W"
                   disabled={busy}
-                  onChange={(value) => setTargetPl1W(value)}
+                  onChange={(value) => setTargetTdpW(value)}
                 />
               </PanelSectionRow>
               <PanelSectionRow>
                 <ButtonItem
                   layout="below"
-                  disabled={busy || targetPl1W == null}
-                  onClick={() => void applyPackagePL1()}
+                  disabled={busy || targetTdpW == null}
+                  onClick={() => void applyPackageTDP()}
                 >
-                  应用 PL1 功耗
+                  应用 TDP
                 </ButtonItem>
               </PanelSectionRow>
               <PanelSectionRow>
-                <div>此项只设置 CPU 与 GPU 共用的长期 PL1 上限；不修改 MMIO、PL2 或 GPU 频率。</div>
+                <div>此项为 CPU 与 GPU 设置共享的整机功耗目标；应用时同步写入 MSR 和 MMIO，不修改 GPU 频率。</div>
               </PanelSectionRow>
             </>
           ) : (
             <PanelSectionRow>
-              <div>{powerState?.error ?? "正在读取 MSR RAPL 功耗状态…"}</div>
+              <div>{powerState?.error ?? "正在读取 MSR / MMIO RAPL 功耗状态…"}</div>
             </PanelSectionRow>
           )}
         </>
