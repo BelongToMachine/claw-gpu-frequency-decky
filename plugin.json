@@ -1,0 +1,11 @@
+{
+  "name": "Claw GPU Frequency",
+  "author": "BelongToMachine",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["claw", "gpu", "frequency"],
+    "description": "GPU frequency control for MSI Claw A1M."
+  },
+  "version": "0.1.0"
+}

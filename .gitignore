@@ -1,0 +1,6 @@
+node_modules/
+.pnpm-store/
+*.py[cod]
+__pycache__/
+.DS_Store
+dist/*.map

@@ -1,0 +1,35 @@
+import os
+import sys
+
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+if PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, PLUGIN_DIR)
+
+import decky_plugin
+
+from gpu_control import (
+    GPUFrequencyError,
+    get_gpu_state,
+    restore_automatic_frequency,
+    set_fixed_frequency,
+)
+
+
+class Plugin:
+    async def get_gpu_state(self):
+        try:
+            return get_gpu_state()
+        except GPUFrequencyError as exc:
+            return {"supported": False, "error": str(exc)}
+
+    async def set_gpu_frequency(self, frequency: int):
+        return set_fixed_frequency(frequency)
+
+    async def restore_gpu_automatic(self):
+        return restore_automatic_frequency()
+
+    async def _main(self):
+        decky_plugin.logger.info("Claw GPU Frequency loaded; no hardware values changed.")
+
+    async def _unload(self):
+        decky_plugin.logger.info("Claw GPU Frequency unloaded.")
