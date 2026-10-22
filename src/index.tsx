@@ -17,6 +17,10 @@ type GPUState = {
   card?: string;
   gt?: string;
   actualFreqMhz?: number | null;
+  requestedFreqMhz?: number | null;
+  firmwareRequestedFreqMhz?: number | null;
+  throttled?: boolean;
+  throttleReasons?: string[];
   minFreqMhz?: number;
   maxFreqMhz?: number;
   boostFreqMhz?: number;
@@ -28,6 +32,16 @@ type GPUState = {
 const getGPUState = callable<[], GPUState>("get_gpu_state");
 const setGPUFrequency = callable<[frequencyMhz: number], GPUState>("set_gpu_frequency");
 const restoreAutomatic = callable<[], GPUState>("restore_gpu_automatic");
+const THROTTLE_LABELS: Record<string, string> = {
+  pl1: "整机封装功耗限制（PL1）",
+  pl2: "短时封装功耗限制（PL2）",
+  pl4: "瞬时功耗限制（PL4）",
+  thermal: "温度限制",
+  prochot: "PROCHOT 温度/功耗限制",
+  ratl: "温度/功耗算法限制（RATL）",
+  vr_thermalert: "电压调节器温度限制",
+  vr_tdc: "电流限制",
+};
 
 function GPUFrequencyPanel() {
   const [state, setState] = useState<GPUState | null>(null);
@@ -96,7 +110,7 @@ function GPUFrequencyPanel() {
   return (
     <PanelSection title="GPU Frequency">
       <PanelSectionRow>
-        <div className={staticClasses.PanelSectionTitle}>当前频率：{actualText}</div>
+        <div className={staticClasses.PanelSectionTitle}>GPU 实际频率：{actualText}</div>
       </PanelSectionRow>
 
       {supported ? (
@@ -106,10 +120,26 @@ function GPUFrequencyPanel() {
               频率限制：{state.minFreqMhz}–{state.maxFreqMhz} MHz · Boost：{state.boostFreqMhz} MHz
             </div>
           </PanelSectionRow>
+          {(state.requestedFreqMhz != null || state.firmwareRequestedFreqMhz != null) && (
+            <PanelSectionRow>
+              <div>
+                驱动请求：{state.requestedFreqMhz ?? "—"} MHz · 固件请求：{state.firmwareRequestedFreqMhz ?? "—"} MHz
+              </div>
+            </PanelSectionRow>
+          )}
+          {state.throttled && (
+            <PanelSectionRow>
+              <div>
+                固件限频：{state.throttleReasons?.length
+                  ? state.throttleReasons.map((reason) => THROTTLE_LABELS[reason] ?? reason).join("、")
+                  : "生效（原因暂不可读）"}
+              </div>
+            </PanelSectionRow>
+          )}
           <PanelSectionRow>
             <SliderField
               label="目标频率"
-              description={`硬件范围 ${state.hwMinFreqMhz}–${state.hwMaxFreqMhz} MHz`}
+              description={`硬件范围 ${state.hwMinFreqMhz}–${state.hwMaxFreqMhz} MHz；调整后点“应用 GPU 频率”才写入驱动`}
               min={state.hwMinFreqMhz ?? 0}
               max={state.hwMaxFreqMhz ?? 0}
               step={state.stepMhz ?? 50}
@@ -142,7 +172,7 @@ function GPUFrequencyPanel() {
             </ButtonItem>
           </PanelSectionRow>
           <PanelSectionRow>
-            <div>空闲时实际频率可能低于请求值；负载和固件的功耗、温度限制也会影响实际频率。</div>
+            <div>插件只请求 GPU 频率；整机功耗或温度限频由固件控制，实际频率可能低于请求值。</div>
           </PanelSectionRow>
         </>
       ) : (

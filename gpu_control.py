@@ -10,6 +10,16 @@ PRODUCT_NAME = "Claw A1M"
 SYSTEM_VENDOR = "Micro-Star International Co., Ltd."
 INTEL_VENDOR_ID = "0x8086"
 FREQUENCY_STEP_MHZ = 50
+THROTTLE_REASON_NODES = (
+    ("pl1", "throttle_reason_pl1"),
+    ("pl2", "throttle_reason_pl2"),
+    ("pl4", "throttle_reason_pl4"),
+    ("thermal", "throttle_reason_thermal"),
+    ("prochot", "throttle_reason_prochot"),
+    ("ratl", "throttle_reason_ratl"),
+    ("vr_thermalert", "throttle_reason_vr_thermalert"),
+    ("vr_tdc", "throttle_reason_vr_tdc"),
+)
 
 
 class GPUFrequencyError(RuntimeError):
@@ -29,6 +39,12 @@ def _read_int(path: Path) -> int:
         return int(value)
     except ValueError as exc:
         raise GPUFrequencyError(f"Unexpected value in {path}: {value!r}") from exc
+
+
+def _read_optional_int(path: Path) -> Optional[int]:
+    if not path.exists():
+        return None
+    return _read_int(path)
 
 
 def _discover_gt0() -> Tuple[str, Path]:
@@ -82,9 +98,17 @@ def _read_state() -> Dict[str, object]:
     min_freq = _read_int(gt0 / "rps_min_freq_mhz")
     max_freq = _read_int(gt0 / "rps_max_freq_mhz")
     boost_freq = _read_int(gt0 / "rps_boost_freq_mhz")
+    requested_freq = _read_optional_int(gt0 / "rps_cur_freq_mhz")
+    firmware_requested_freq = _read_optional_int(gt0 / "punit_req_freq_mhz")
     hw_min = _read_int(gt0 / "rps_RPn_freq_mhz")
     hw_max = _read_int(gt0 / "rps_RP0_freq_mhz")
     actual_freq = _read_int(gt0 / "rps_act_freq_mhz")
+    throttled = _read_optional_int(gt0 / "throttle_reason_status") == 1
+    throttle_reasons = [
+        reason
+        for reason, node in THROTTLE_REASON_NODES
+        if _read_optional_int(gt0 / node) == 1
+    ]
 
     if hw_min <= 0 or hw_max < hw_min:
         raise GPUFrequencyError(f"Invalid hardware frequency range: {hw_min}–{hw_max} MHz.")
@@ -108,6 +132,10 @@ def _read_state() -> Dict[str, object]:
         "card": card_name,
         "gt": "gt0",
         "actualFreqMhz": actual_freq if actual_freq > 0 else None,
+        "requestedFreqMhz": requested_freq,
+        "firmwareRequestedFreqMhz": firmware_requested_freq,
+        "throttled": throttled,
+        "throttleReasons": throttle_reasons,
         "minFreqMhz": min_freq,
         "maxFreqMhz": max_freq,
         "boostFreqMhz": boost_freq,

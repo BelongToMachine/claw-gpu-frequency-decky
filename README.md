@@ -10,13 +10,17 @@ The interface uses Decky's built-in panel, slider, and button components.
 - **Restore automatic frequency** resets those limits to the hardware's `RPn`–`RP0`
   range and boost frequency to the hardware maximum so the driver can scale the GPU
   dynamically again.
-- The current frequency and live limits are read from sysfs every two seconds.
+- The GPU's actual clock, driver and firmware requests, live limits, and available
+  hardware throttle reasons are read from sysfs every two seconds.
 
 The plugin only writes after the user selects **Apply GPU Frequency** or
 **Restore automatic frequency**. Loading or refreshing the panel is read-only.
 The backend refuses to write unless the system identifies as an MSI Claw A1M
 and exposes one Intel i915 GT0 frequency interface. Actual clock speed can still
-be lower than requested when power or thermal limits apply.
+be lower than requested when the platform firmware enforces package power or
+thermal limits. On supported kernels, the panel reports active i915 throttle
+reasons such as the package PL1 power limit. Moving the slider only selects a
+target; **Apply GPU Frequency** writes it to the driver.
 
 ## Build
 
