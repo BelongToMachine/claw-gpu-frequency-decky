@@ -18,16 +18,27 @@ The interface uses Decky's built-in panel, slider, button, toggle, and dropdown 
   `/sys/devices/system/cpu/intel_pstate/no_turbo`.
 - **SMT** enables or disables simultaneous multithreading through the kernel's
   `/sys/devices/system/cpu/smt/control` interface when its current state is
-  toggleable.
+  toggleable. On this Claw A1M topology, SMT applies to the P-core sibling
+  threads; E-cores do not have SMT.
+- **P/E core counts** controls physical core groups through Linux CPU hotplug.
+  P-cores can be set from 1 to 4 because CPU 0 belongs to P-core 1 and must
+  remain online; E-cores can be set from 0 to 4. The controls require the
+  verified 4P + 4E topology with logical CPUs 0–11.
+- **P/E maximum frequency** sets a separate `scaling_max_freq` limit for each
+  core class. Limits are saved in Decky's plugin settings directory and applied
+  to that class's online CPU frequency policies, including when cores are
+  brought online later. A frequency limit is an upper bound; HWP, package power,
+  and thermal limits still determine the actual clock.
 - **CPU governor** selects a policy from the governors supported by every online
   CPU frequency policy. The selected governor is applied to all those policies.
 - The GPU's actual clock, driver and firmware requests, live limits, and available
   hardware throttle reasons are read from sysfs every two seconds.
 
-The plugin only writes after the user selects **Apply GPU Frequency**,
-**Restore automatic frequency**, **Apply TDP**, or changes one of the CPU controls.
-Loading or refreshing the panel is read-only. The TDP slider adjusts the CPU and
-GPU's shared package power budget; it is not a direct GPU frequency control.
+Loading or refreshing the panel is read-only. The plugin writes GPU and TDP
+values only after their apply buttons are selected. CPU toggles apply
+immediately; core count sliders apply after **应用核心数量**, and frequency
+limits apply after their P-core or E-core button. The TDP slider adjusts the CPU
+and GPU's shared package power budget; it is not a direct GPU frequency control.
 All CPU and package power controls refuse to write unless the system identifies
 as an MSI Claw A1M. GPU frequency control additionally requires one Intel i915
 GT0 frequency interface. Actual GPU clock speed can still be lower than

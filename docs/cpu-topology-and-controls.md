@@ -116,7 +116,17 @@ Linux 文档说明，no_turbo=1 会禁止驱动使用 turbo P-state；设为 0 �
 - SMT：写入 /sys/devices/system/cpu/smt/control 的 on 或 off，控制 SMT sibling 线程。
 - 调频策略：对在线 CPU 对应的 scaling_governor 写入所选策略。
 
-本插件没有逐个写入 cpuN/online 的“核心数量”功能。它的 SMT 开关会改变 sibling 线程的在线状态，但不会实现 PowerDeck 的 cpuCores 逻辑。
+### 本地代码第一版的 P/E 核组控制
+
+本地代码新增了按物理核心分组的数量与频率上限控制；这一版目前只写入本地仓库，尚未安装到掌机。
+
+- P 核数量范围为 1–4。每个 P 核按 SMT sibling 对操作，例如 P 核 3 对应 CPU 4、5。CPU 0 属于 P 核 1，必须保持在线。
+- E 核数量范围为 0–4，分别控制 CPU 8–11。
+- P 核 SMT 使用 Linux 全局 SMT 控制；切换时保留当前启用的物理核心数，并相应上线或下线这些 P 核的 sibling 线程。
+- P 核和 E 核各有一个最高频率上限，写入该类在线 CPUFreq 策略的 scaling_max_freq。离线类别的目标会保存在 Decky 插件设置目录，并在通过插件重新上线时应用。
+- UI 每两秒读取一次该类在线策略的上限，以及 cpuinfo_cur_freq 或 scaling_cur_freq 的当前读数。
+- 频率值是上限，不是固定频率；HWP、整机功耗和温度约束仍会影响实际频率。
+- 核心数量控制会核对 present CPU 列表及当前可读取的 sibling 拓扑；仅支持已核实的 CPU 0–11、4P + 4E 配置，不匹配时拒绝写入。
 
 ## 用户回忆的频率上限与当前读数
 
@@ -143,6 +153,7 @@ CPU 0/1 与 CPU 2/3 分别是同物理核心的 SMT siblings，因此不能把 C
 3. PowerDeck 的在线 CPU 数控制使用 Linux CPU hotplug，按逻辑 CPU 编号逐个写 cpuN/online。保存的游戏配置曾要求 cpuCores=2、smt=false，这能解释为什么在线 CPU 数会比 BIOS 提供的 12 个更少，但无法证明是唯一原因。
 4. 自制插件的 Boost 开关通过 intel_pstate/no_turbo 允许或禁止 Turbo；它不会设置固定 MHz，也不会替代 BIOS 对 P-core/E-core 的频率限制。
 5. P-core 3500 MHz、E-core 1700 MHz 是用户回忆的 BIOS 限制，当前 Linux 快照没有直接验证这两个硬件上限。
+6. 本地代码第一版已加入 P 核 1–4、E 核 0–4、P 核 SMT 和 P/E 分组频率上限控制；设备端仍运行已安装版本，尚未应用这次本地改动。
 
 ## 参考资料
 

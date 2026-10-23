@@ -11,6 +11,8 @@ from cpu_control import (
     CPUControlError,
     get_cpu_control_state as read_cpu_control_state,
     set_cpu_boost,
+    set_cpu_cluster_frequency_limit,
+    set_cpu_core_counts,
     set_cpu_governor,
     set_smt,
 )
@@ -37,6 +39,12 @@ class Plugin:
 
     async def set_smt(self, enabled: bool):
         return set_smt(enabled)
+
+    async def set_cpu_core_counts(self, p_core_count: int, e_core_count: int):
+        return set_cpu_core_counts(p_core_count, e_core_count)
+
+    async def set_cpu_cluster_frequency_limit(self, core_type: str, frequency_mhz: int):
+        return set_cpu_cluster_frequency_limit(core_type, frequency_mhz)
 
     async def set_cpu_governor(self, governor: str):
         return set_cpu_governor(governor)
