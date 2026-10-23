@@ -85,9 +85,8 @@ function FaMicrochip (props) {
 const PROFILE_MODE_STORAGE_KEY = "claw-gpu-frequency.profile-mode";
 function readSavedProfileMode() {
     try {
-        return window.localStorage.getItem(PROFILE_MODE_STORAGE_KEY) === "docked"
-            ? "docked"
-            : "handheld";
+        const savedMode = window.localStorage.getItem(PROFILE_MODE_STORAGE_KEY);
+        return savedMode === "docked" || savedMode === "customize" ? savedMode : "handheld";
     }
     catch {
         return "handheld";
@@ -116,7 +115,6 @@ const setCPUClusterFrequencyLimit = callable("set_cpu_cluster_frequency_limit");
 const getGameProfiles = callable("get_game_profiles");
 const saveGameProfile = callable("save_game_profile");
 const applyGameProfile = callable("apply_game_profile");
-const debugProfileModeSelection = callable("debug_profile_mode_selection");
 const THROTTLE_LABELS = {
     pl1: "整机封装功耗限制（PL1）",
     pl2: "短时封装功耗限制（PL2）",
@@ -147,7 +145,42 @@ function formatProfileSummary(profile) {
     return `${gpuText} · ${packageTdpW} W · ${coreText}`;
 }
 function profileModeLabel(mode) {
-    return mode === "handheld" ? "掌机模式" : "主机模式";
+    if (mode === "handheld")
+        return "掌机模式";
+    if (mode === "docked")
+        return "主机模式";
+    return "Customize";
+}
+function profileMatchesCurrentSettings(profile, gpu, power, cpu) {
+    const settings = profile.settings;
+    if (gpu.supported && typeof gpu.minFreqMhz === "number" && typeof gpu.maxFreqMhz === "number") {
+        const automatic = gpu.minFreqMhz !== gpu.maxFreqMhz;
+        if (settings.gpu.automatic !== automatic)
+            return false;
+        if (!automatic && settings.gpu.frequencyMhz !== gpu.minFreqMhz)
+            return false;
+    }
+    if (power.supported && settings.packageTdpW !== power.currentTdpW)
+        return false;
+    const optionalMatches = (expected, actual) => expected === null || expected === actual;
+    const expectedCPU = settings.cpu;
+    if (!optionalMatches(expectedCPU.boostEnabled, cpu.cpuBoostEnabled))
+        return false;
+    if (!optionalMatches(expectedCPU.smtEnabled, cpu.smtEnabled))
+        return false;
+    if (!optionalMatches(expectedCPU.pCoreCount, cpu.pCoreCount))
+        return false;
+    if (!optionalMatches(expectedCPU.eCoreCount, cpu.eCoreCount))
+        return false;
+    if (!optionalMatches(expectedCPU.pCoreMaxFrequencyMhz, cpu.pCoreFrequencyTargetMhz))
+        return false;
+    if (!optionalMatches(expectedCPU.eCoreMaxFrequencyMhz, cpu.eCoreFrequencyTargetMhz))
+        return false;
+    if (expectedCPU.governor !== null) {
+        if (cpu.governorMixed || expectedCPU.governor !== cpu.currentGovernor)
+            return false;
+    }
+    return true;
 }
 function GPUFrequencyPanel() {
     const [state, setState] = SP_REACT.useState(null);
@@ -161,50 +194,12 @@ function GPUFrequencyPanel() {
     const [targetECoreFrequencyMhz, setTargetECoreFrequencyMhz] = SP_REACT.useState(null);
     const [activeGame, setActiveGame] = SP_REACT.useState(null);
     const [profileMode, setProfileMode] = SP_REACT.useState(readSavedProfileMode);
-    const [profileModeDebug, setProfileModeDebug] = SP_REACT.useState("等待选择");
     const [gameProfiles, setGameProfiles] = SP_REACT.useState(null);
     const [busy, setBusy] = SP_REACT.useState(false);
     const [message, setMessage] = SP_REACT.useState("");
     const targetInitialized = SP_REACT.useRef(false);
     const powerTargetInitialized = SP_REACT.useRef(false);
     const coreTargetsInitialized = SP_REACT.useRef(false);
-    const previousProfileMode = SP_REACT.useRef(profileMode);
-    const profileModeDebugInstance = SP_REACT.useRef(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`).current;
-    SP_REACT.useEffect(() => {
-        const value = `${profileModeDebugInstance}:mounted:mode=${profileMode}`;
-        console.info("[ClawGPUFrequency][ProfileModeDebug] component mounted", value);
-        setProfileModeDebug(`组件已加载：${profileModeLabel(profileMode)}`);
-        void debugProfileModeSelection("component_mounted", value).catch((error) => {
-            console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-        });
-        return () => {
-            const unmountedValue = `${profileModeDebugInstance}:unmounted`;
-            console.info("[ClawGPUFrequency][ProfileModeDebug] component unmounted", unmountedValue);
-            void debugProfileModeSelection("component_unmounted", unmountedValue).catch((error) => {
-                console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-            });
-        };
-    }, [profileModeDebugInstance]);
-    SP_REACT.useEffect(() => {
-        if (profileModeDebug === "等待选择")
-            return;
-        const value = `${profileModeDebugInstance}:${profileModeDebug}`;
-        console.info("[ClawGPUFrequency][ProfileModeDebug] debug state committed", value);
-        void debugProfileModeSelection("debug_state_committed", value).catch((error) => {
-            console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-        });
-    }, [profileModeDebug, profileModeDebugInstance]);
-    SP_REACT.useEffect(() => {
-        if (previousProfileMode.current === profileMode)
-            return;
-        previousProfileMode.current = profileMode;
-        const value = String(profileMode);
-        console.info("[ClawGPUFrequency][ProfileModeDebug] state committed", value);
-        setProfileModeDebug(`状态已更新：${value}`);
-        void debugProfileModeSelection("state_committed", value).catch((error) => {
-            console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-        });
-    }, [profileMode]);
     SP_REACT.useEffect(() => {
         let mounted = true;
         const detectActiveGame = () => {
@@ -327,6 +322,27 @@ function GPUFrequencyPanel() {
             window.clearInterval(timer);
         };
     }, []);
+    SP_REACT.useEffect(() => {
+        if (busy || profileMode === "customize" || !activeGame)
+            return;
+        const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
+        if (!profiles || profiles.supported === false)
+            return;
+        const profile = profiles.profiles?.[profileMode];
+        if (!profile) {
+            setProfileMode("customize");
+            saveProfileModePreference("customize");
+            setMessage(`尚未保存${profileModeLabel(profileMode)} Profile；当前处于 Customize`);
+            return;
+        }
+        if (!state || !powerState || !cpuState)
+            return;
+        if (!profileMatchesCurrentSettings(profile, state, powerState, cpuState)) {
+            setProfileMode("customize");
+            saveProfileModePreference("customize");
+            setMessage(`当前设置与${profileModeLabel(profileMode)} Profile 不一致，已切换为 Customize`);
+        }
+    }, [activeGame?.appId, busy, cpuState, gameProfiles, powerState, profileMode, state]);
     const apply = async (action, successMessage) => {
         setBusy(true);
         setMessage("");
@@ -430,48 +446,48 @@ function GPUFrequencyPanel() {
             setBusy(false);
         }
     };
-    const saveSelectedGameProfile = async () => {
+    const syncAppliedProfileState = (next) => {
+        setState(next.gpuState);
+        setPowerState(next.packagePowerState);
+        setCPUState(next.cpuState);
+        setTargetMhz(next.gpuState.minFreqMhz === next.gpuState.maxFreqMhz
+            ? next.gpuState.minFreqMhz ?? null
+            : next.gpuState.maxFreqMhz ?? null);
+        setTargetTdpW(next.packagePowerState.currentTdpW ?? null);
+        setTargetPCoreCount(next.cpuState.pCoreCount ?? null);
+        setTargetECoreCount(next.cpuState.eCoreCount ?? null);
+        setTargetPCoreFrequencyMhz(next.cpuState.pCoreFrequencyTargetMhz ?? null);
+        setTargetECoreFrequencyMhz(next.cpuState.eCoreFrequencyTargetMhz ?? null);
+        targetInitialized.current = true;
+        powerTargetInitialized.current = true;
+        coreTargetsInitialized.current = true;
+    };
+    const selectProfileMode = async (mode) => {
+        if (mode === "customize") {
+            setProfileMode(mode);
+            saveProfileModePreference(mode);
+            setMessage("当前为 Customize；可将当前设置覆盖到掌机或主机 Profile");
+            return;
+        }
         if (!activeGame)
             return;
-        setBusy(true);
-        setMessage("");
-        try {
-            const next = await saveGameProfile(activeGame.appId, activeGame.name, profileMode);
-            if (next.supported === false)
-                throw new Error(next.error ?? "无法保存游戏配置");
-            setGameProfiles(next);
-            setMessage(`已保存 ${activeGame.name} 的${profileModeLabel(profileMode)}配置`);
-        }
-        catch (error) {
-            setMessage(error instanceof Error ? error.message : String(error));
-        }
-        finally {
-            setBusy(false);
-        }
-    };
-    const applySelectedGameProfile = async () => {
-        if (!activeGame || !gameProfiles?.profiles?.[profileMode])
+        const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
+        if (!profiles || profiles.supported === false)
             return;
         const game = activeGame;
-        const mode = profileMode;
+        if (!profiles.profiles?.[mode]) {
+            setProfileMode("customize");
+            saveProfileModePreference("customize");
+            setMessage(`尚未保存${profileModeLabel(mode)} Profile；当前设置未更改，可在 Customize 中覆盖保存`);
+            return;
+        }
         setBusy(true);
         setMessage("");
         try {
             const next = await applyGameProfile(game.appId, mode);
-            setState(next.gpuState);
-            setPowerState(next.packagePowerState);
-            setCPUState(next.cpuState);
-            setTargetMhz(next.gpuState.minFreqMhz === next.gpuState.maxFreqMhz
-                ? next.gpuState.minFreqMhz ?? null
-                : next.gpuState.maxFreqMhz ?? null);
-            setTargetTdpW(next.packagePowerState.currentTdpW ?? null);
-            setTargetPCoreCount(next.cpuState.pCoreCount ?? null);
-            setTargetECoreCount(next.cpuState.eCoreCount ?? null);
-            setTargetPCoreFrequencyMhz(next.cpuState.pCoreFrequencyTargetMhz ?? null);
-            setTargetECoreFrequencyMhz(next.cpuState.eCoreFrequencyTargetMhz ?? null);
-            targetInitialized.current = true;
-            powerTargetInitialized.current = true;
-            coreTargetsInitialized.current = true;
+            syncAppliedProfileState(next);
+            setProfileMode(mode);
+            saveProfileModePreference(mode);
             setMessage(`已应用 ${game.name} 的${profileModeLabel(mode)}配置：${next.applied.join("、")}`);
         }
         catch (error) {
@@ -481,9 +497,38 @@ function GPUFrequencyPanel() {
             setBusy(false);
         }
     };
+    const overwriteGameProfile = async (mode, game) => {
+        setBusy(true);
+        setMessage("");
+        try {
+            const next = await saveGameProfile(game.appId, game.name, mode);
+            if (next.supported === false)
+                throw new Error(next.error ?? "无法覆盖游戏配置");
+            setGameProfiles(next);
+            setProfileMode(mode);
+            saveProfileModePreference(mode);
+            setMessage(`已将当前设置保存到 ${game.name} 的${profileModeLabel(mode)} Profile`);
+        }
+        catch (error) {
+            setMessage(error instanceof Error ? error.message : String(error));
+        }
+        finally {
+            setBusy(false);
+        }
+    };
+    const confirmOverwriteGameProfile = (mode) => {
+        if (!activeGame || profileMode !== "customize")
+            return;
+        const game = activeGame;
+        const label = profileModeLabel(mode);
+        let modal;
+        modal = DFL.showModal(SP_JSX.jsx(DFL.ConfirmModal, { strTitle: `覆盖${label} Profile？`, strDescription: `将用当前已生效设置覆盖 ${game.name} 的${label} Profile。原 Profile 内容会被替换。`, strOKButtonText: "\u786E\u8BA4\u8986\u76D6", strCancelButtonText: "\u53D6\u6D88", bDestructiveWarning: true, onCancel: () => modal?.Close(), onOK: () => {
+                modal?.Close();
+                void overwriteGameProfile(mode, game);
+            } }));
+    };
     const supported = state?.supported === true;
     const currentGameProfiles = gameProfiles?.appId === activeGame?.appId ? gameProfiles : null;
-    const selectedProfile = currentGameProfiles?.profiles?.[profileMode] ?? null;
     const availableGovernors = cpuState?.availableGovernors ?? [];
     const governorToggleSupported = cpuState?.governorSupported === true
         && availableGovernors.includes("performance")
@@ -507,29 +552,17 @@ function GPUFrequencyPanel() {
                         : "未检测到运行中的 Steam 游戏" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u914D\u7F6E\u6A21\u5F0F", description: profileModeLabel(profileMode), rgOptions: [
                         { data: "handheld", label: "掌机模式" },
                         { data: "docked", label: "主机模式" },
-                    ], selectedOption: profileMode, disabled: busy, onChange: (option) => {
+                        { data: "customize", label: "Customize" },
+                    ], selectedOption: profileMode, disabled: busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false, onChange: (option) => {
                         const selectedMode = option?.data;
-                        const value = String(selectedMode);
-                        console.info("[ClawGPUFrequency][ProfileModeDebug] dropdown onChange", option);
-                        setProfileModeDebug(`回调已触发：${value}`);
-                        void debugProfileModeSelection("dropdown_on_change", value).catch((error) => {
-                            console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-                        });
-                        if (selectedMode !== "handheld" && selectedMode !== "docked") {
-                            setProfileModeDebug(`收到无效模式：${value}`);
-                            return;
+                        if (selectedMode === "handheld" || selectedMode === "docked" || selectedMode === "customize") {
+                            void selectProfileMode(selectedMode);
                         }
-                        const saved = saveProfileModePreference(selectedMode);
-                        console.info("[ClawGPUFrequency][ProfileModeDebug] dispatching state updates", `${profileModeDebugInstance}:${value}:stored=${saved}`);
-                        setProfileMode(selectedMode);
-                        void debugProfileModeSelection("state_update_dispatched", `${profileModeDebugInstance}:${value}:stored=${saved}`).catch((error) => {
-                            console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-                        });
-                    } }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u8C03\u8BD5\uFF1A", profileModeDebug] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u638C\u673A\uFF1A", activeGame && !currentGameProfiles
+                    } }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u638C\u673A\uFF1A", activeGame && !currentGameProfiles
                             ? "读取中…"
                             : formatProfileSummary(currentGameProfiles?.profiles?.handheld)] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u4E3B\u673A\uFF1A", activeGame && !currentGameProfiles
                             ? "读取中…"
-                            : formatProfileSummary(currentGameProfiles?.profiles?.docked)] }) }), currentGameProfiles?.supported === false && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: currentGameProfiles.error ?? "游戏 Profile 存储不可用" }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false, onClick: () => void saveSelectedGameProfile(), children: ["\u4FDD\u5B58\u5F53\u524D\u5DF2\u751F\u6548\u8BBE\u7F6E\u4E3A", profileModeLabel(profileMode), " Profile"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: busy || !activeGame || !selectedProfile || currentGameProfiles?.supported === false, onClick: () => void applySelectedGameProfile(), children: ["\u5E94\u7528", profileModeLabel(profileMode), " Profile"] }) }), supported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u9891\u7387\u9650\u5236\uFF1A", state.minFreqMhz, "\u2013", state.maxFreqMhz, " MHz \u00B7 Boost\uFF1A", state.boostFreqMhz, " MHz"] }) }), (state.requestedFreqMhz != null || state.firmwareRequestedFreqMhz != null) && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u9A71\u52A8\u8BF7\u6C42\uFF1A", state.requestedFreqMhz ?? "—", " MHz \u00B7 \u56FA\u4EF6\u8BF7\u6C42\uFF1A", state.firmwareRequestedFreqMhz ?? "—", " MHz"] }) })), state.throttled && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u56FA\u4EF6\u9650\u9891\uFF1A", state.throttleReasons?.length
+                            : formatProfileSummary(currentGameProfiles?.profiles?.docked)] }) }), currentGameProfiles?.supported === false && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: currentGameProfiles.error ?? "游戏 Profile 存储不可用" }) })), profileMode === "customize" && (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false, onClick: () => confirmOverwriteGameProfile("handheld"), children: "\u8986\u76D6\u638C\u673A\u6A21\u5F0F Profile" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false, onClick: () => confirmOverwriteGameProfile("docked"), children: "\u8986\u76D6\u4E3B\u673A\u6A21\u5F0F Profile" }) })] })), supported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u9891\u7387\u9650\u5236\uFF1A", state.minFreqMhz, "\u2013", state.maxFreqMhz, " MHz \u00B7 Boost\uFF1A", state.boostFreqMhz, " MHz"] }) }), (state.requestedFreqMhz != null || state.firmwareRequestedFreqMhz != null) && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u9A71\u52A8\u8BF7\u6C42\uFF1A", state.requestedFreqMhz ?? "—", " MHz \u00B7 \u56FA\u4EF6\u8BF7\u6C42\uFF1A", state.firmwareRequestedFreqMhz ?? "—", " MHz"] }) })), state.throttled && (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u56FA\u4EF6\u9650\u9891\uFF1A", state.throttleReasons?.length
                                     ? state.throttleReasons.map((reason) => THROTTLE_LABELS[reason] ?? reason).join("、")
                                     : "生效（原因暂不可读）"] }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "\u76EE\u6807\u9891\u7387", description: `硬件范围 ${state.hwMinFreqMhz}–${state.hwMaxFreqMhz} MHz；调整后点“应用 GPU 频率”才写入驱动`, min: state.hwMinFreqMhz ?? 0, max: state.hwMaxFreqMhz ?? 0, step: state.stepMhz ?? 50, value: targetMhz ?? state.maxFreqMhz ?? 0, showValue: true, valueSuffix: " MHz", disabled: busy, onChange: (value) => setTargetMhz(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || targetMhz == null, onClick: () => targetMhz != null && void apply(() => setGPUFrequency(targetMhz), `已请求固定到 ${targetMhz} MHz`), children: "\u5E94\u7528 GPU \u9891\u7387" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: () => void apply(restoreAutomatic, "已恢复自动频率范围"), children: "\u6062\u590D\u81EA\u52A8\u9891\u7387" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "\u63D2\u4EF6\u53EA\u8BF7\u6C42 GPU \u9891\u7387\uFF1B\u6574\u673A\u529F\u8017\u6216\u6E29\u5EA6\u9650\u9891\u7531\u56FA\u4EF6\u63A7\u5236\uFF0C\u5B9E\u9645\u9891\u7387\u53EF\u80FD\u4F4E\u4E8E\u8BF7\u6C42\u503C\u3002" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { className: DFL.staticClasses.PanelSectionTitle, children: "\u6574\u673A TDP\uFF08MSR + MMIO\uFF09" }) }), powerState?.supported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u5F53\u524D\u6709\u6548\u6574\u673A\u4E0A\u9650\uFF1A", powerState.currentTdpW, " W \u00B7 \u786C\u4EF6\u4E0A\u9650\uFF1A", powerState.maxTdpW, " W"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "\u6574\u673A TDP", description: `范围 ${powerState.minTdpW}–${powerState.maxTdpW} W；应用后同步设置 MSR 与 MMIO 的 PL1、PL2`, min: powerState.minTdpW ?? 5, max: powerState.maxTdpW ?? 28, step: 1, value: targetTdpW ?? powerState.currentTdpW ?? powerState.minTdpW ?? 5, showValue: true, valueSuffix: " W", disabled: busy, onChange: (value) => setTargetTdpW(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || targetTdpW == null, onClick: () => void applyPackageTDP(), children: "\u5E94\u7528 TDP" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "\u6B64\u9879\u4E3A CPU \u4E0E GPU \u8BBE\u7F6E\u5171\u4EAB\u7684\u6574\u673A\u529F\u8017\u76EE\u6807\uFF1B\u5E94\u7528\u65F6\u540C\u6B65\u5199\u5165 MSR \u548C MMIO\uFF0C\u4E0D\u4FEE\u6539 GPU \u9891\u7387\u3002" }) })] })) : (SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: powerState?.error ?? "正在读取 MSR / MMIO RAPL 功耗状态…" }) })), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { className: DFL.staticClasses.PanelSectionTitle, children: "CPU Controls" }) }), cpuState?.supported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [cpuState.coreControlSupported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { className: DFL.staticClasses.PanelSectionTitle, children: "P/E \u6838\u5FC3\u6570\u91CF" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u5F53\u524D\u5728\u7EBF\uFF1AP \u6838 ", cpuState.pCoreCount, "/4 \u00B7 E \u6838 ", cpuState.eCoreCount, "/4 \u00B7 \u903B\u8F91 CPU ", cpuState.onlineCPUs ?? "—"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "P \u6838\u6570\u91CF", description: "\u6309\u7269\u7406\u6838\u5FC3\u8BA1\u6570\uFF1BCPU 0 \u6240\u5728\u7684 P \u6838\u5FC5\u987B\u4FDD\u7559", min: cpuState.pCoreCountMin ?? 1, max: cpuState.pCoreCountMax ?? 4, step: 1, value: targetPCoreCount ?? cpuState.pCoreCount ?? 1, showValue: true, disabled: busy, onChange: (value) => setTargetPCoreCount(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "E \u6838\u6570\u91CF", description: "\u6309\u7269\u7406\u6838\u5FC3\u8BA1\u6570\uFF0C\u53EF\u8BBE\u4E3A 0\u20134", min: cpuState.eCoreCountMin ?? 0, max: cpuState.eCoreCountMax ?? 4, step: 1, value: targetECoreCount ?? cpuState.eCoreCount ?? 0, showValue: true, disabled: busy, onChange: (value) => setTargetECoreCount(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy || targetPCoreCount == null || targetECoreCount == null, onClick: () => void applyCPUCoreCounts(), children: "\u5E94\u7528\u6838\u5FC3\u6570\u91CF" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { className: DFL.staticClasses.PanelSectionTitle, children: "P/E \u6838\u6700\u9AD8\u9891\u7387" }) }), cpuState.pCoreFrequencySupported ? (SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.SliderField, { label: "P \u6838\u6700\u9AD8\u9891\u7387", description: `范围 ${cpuState.pCoreFrequencyMinMhz}–${cpuState.pCoreFrequencyMaxMhz} MHz；应用后统一在线 P 核策略${cpuState.pCoreFrequencyMixed ? "（当前策略不一致）" : ""}`, min: cpuState.pCoreFrequencyMinMhz ?? 400, max: cpuState.pCoreFrequencyMaxMhz ?? 4600, step: 100, value: targetPCoreFrequencyMhz ?? cpuState.pCoreFrequencyMaxMhz ?? 4600, showValue: true, valueSuffix: " MHz", disabled: busy, onChange: (value) => setTargetPCoreFrequencyMhz(value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u5F53\u524D P \u6838\u4E0A\u9650\uFF1A", cpuState.pCoreFrequencyCurrentMhz != null
                                                             ? `${cpuState.pCoreFrequencyCurrentMhz} MHz`

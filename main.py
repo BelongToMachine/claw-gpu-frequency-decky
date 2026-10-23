@@ -88,13 +88,6 @@ class Plugin:
     async def apply_game_profile(self, app_id: int, mode: str):
         return apply_saved_game_profile(app_id, mode)
 
-    async def debug_profile_mode_selection(self, event: str, value: str):
-        decky_plugin.logger.info(
-            "[ProfileModeDebug] event=%r value=%r",
-            str(event)[:80],
-            str(value)[:120],
-        )
-
     async def _main(self):
         decky_plugin.logger.info("Claw GPU Frequency loaded; no hardware values changed.")
 

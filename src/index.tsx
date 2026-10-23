@@ -1,9 +1,11 @@
 import {
   ButtonItem,
+  ConfirmModal,
   DropdownItem,
   PanelSection,
   PanelSectionRow,
   SliderField,
+  showModal,
   staticClasses,
   ToggleField,
 } from "@decky/ui";
@@ -88,7 +90,8 @@ type CPUControlState = {
   eCoreActualFrequencyReadings?: number;
 };
 
-type ProfileMode = "handheld" | "docked";
+type SavedProfileMode = "handheld" | "docked";
+type ProfileMode = SavedProfileMode | "customize";
 
 type SavedGameProfile = {
   savedAt: string;
@@ -112,7 +115,7 @@ type GameProfilesState = {
   error?: string;
   appId?: number;
   gameName?: string;
-  profiles?: Record<ProfileMode, SavedGameProfile | null>;
+  profiles?: Record<SavedProfileMode, SavedGameProfile | null>;
 };
 
 type GameProfileApplyResult = {
@@ -128,9 +131,8 @@ const PROFILE_MODE_STORAGE_KEY = "claw-gpu-frequency.profile-mode";
 
 function readSavedProfileMode(): ProfileMode {
   try {
-    return window.localStorage.getItem(PROFILE_MODE_STORAGE_KEY) === "docked"
-      ? "docked"
-      : "handheld";
+    const savedMode = window.localStorage.getItem(PROFILE_MODE_STORAGE_KEY);
+    return savedMode === "docked" || savedMode === "customize" ? savedMode : "handheld";
   } catch {
     return "handheld";
   }
@@ -157,9 +159,8 @@ const setCPUGovernor = callable<[governor: string], CPUControlState>("set_cpu_go
 const setCPUCoreCounts = callable<[pCoreCount: number, eCoreCount: number], CPUControlState>("set_cpu_core_counts");
 const setCPUClusterFrequencyLimit = callable<[coreType: "p" | "e", frequencyMhz: number], CPUControlState>("set_cpu_cluster_frequency_limit");
 const getGameProfiles = callable<[appId: number], GameProfilesState>("get_game_profiles");
-const saveGameProfile = callable<[appId: number, gameName: string, mode: ProfileMode], GameProfilesState>("save_game_profile");
-const applyGameProfile = callable<[appId: number, mode: ProfileMode], GameProfileApplyResult>("apply_game_profile");
-const debugProfileModeSelection = callable<[event: string, value: string], void>("debug_profile_mode_selection");
+const saveGameProfile = callable<[appId: number, gameName: string, mode: SavedProfileMode], GameProfilesState>("save_game_profile");
+const applyGameProfile = callable<[appId: number, mode: SavedProfileMode], GameProfileApplyResult>("apply_game_profile");
 const THROTTLE_LABELS: Record<string, string> = {
   pl1: "整机封装功耗限制（PL1）",
   pl2: "短时封装功耗限制（PL2）",
@@ -191,7 +192,38 @@ function formatProfileSummary(profile: SavedGameProfile | null | undefined) {
 }
 
 function profileModeLabel(mode: ProfileMode) {
-  return mode === "handheld" ? "掌机模式" : "主机模式";
+  if (mode === "handheld") return "掌机模式";
+  if (mode === "docked") return "主机模式";
+  return "Customize";
+}
+
+function profileMatchesCurrentSettings(
+  profile: SavedGameProfile,
+  gpu: GPUState,
+  power: PackagePowerState,
+  cpu: CPUControlState,
+) {
+  const settings = profile.settings;
+  if (gpu.supported && typeof gpu.minFreqMhz === "number" && typeof gpu.maxFreqMhz === "number") {
+    const automatic = gpu.minFreqMhz !== gpu.maxFreqMhz;
+    if (settings.gpu.automatic !== automatic) return false;
+    if (!automatic && settings.gpu.frequencyMhz !== gpu.minFreqMhz) return false;
+  }
+  if (power.supported && settings.packageTdpW !== power.currentTdpW) return false;
+
+  const optionalMatches = <T,>(expected: T | null, actual: T | null | undefined) =>
+    expected === null || expected === actual;
+  const expectedCPU = settings.cpu;
+  if (!optionalMatches(expectedCPU.boostEnabled, cpu.cpuBoostEnabled)) return false;
+  if (!optionalMatches(expectedCPU.smtEnabled, cpu.smtEnabled)) return false;
+  if (!optionalMatches(expectedCPU.pCoreCount, cpu.pCoreCount)) return false;
+  if (!optionalMatches(expectedCPU.eCoreCount, cpu.eCoreCount)) return false;
+  if (!optionalMatches(expectedCPU.pCoreMaxFrequencyMhz, cpu.pCoreFrequencyTargetMhz)) return false;
+  if (!optionalMatches(expectedCPU.eCoreMaxFrequencyMhz, cpu.eCoreFrequencyTargetMhz)) return false;
+  if (expectedCPU.governor !== null) {
+    if (cpu.governorMixed || expectedCPU.governor !== cpu.currentGovernor) return false;
+  }
+  return true;
 }
 
 function GPUFrequencyPanel() {
@@ -206,53 +238,12 @@ function GPUFrequencyPanel() {
   const [targetECoreFrequencyMhz, setTargetECoreFrequencyMhz] = useState<number | null>(null);
   const [activeGame, setActiveGame] = useState<ActiveGame | null>(null);
   const [profileMode, setProfileMode] = useState<ProfileMode>(readSavedProfileMode);
-  const [profileModeDebug, setProfileModeDebug] = useState("等待选择");
   const [gameProfiles, setGameProfiles] = useState<GameProfilesState | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const targetInitialized = useRef(false);
   const powerTargetInitialized = useRef(false);
   const coreTargetsInitialized = useRef(false);
-  const previousProfileMode = useRef(profileMode);
-  const profileModeDebugInstance = useRef(
-    `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-  ).current;
-
-  useEffect(() => {
-    const value = `${profileModeDebugInstance}:mounted:mode=${profileMode}`;
-    console.info("[ClawGPUFrequency][ProfileModeDebug] component mounted", value);
-    setProfileModeDebug(`组件已加载：${profileModeLabel(profileMode)}`);
-    void debugProfileModeSelection("component_mounted", value).catch((error) => {
-      console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-    });
-    return () => {
-      const unmountedValue = `${profileModeDebugInstance}:unmounted`;
-      console.info("[ClawGPUFrequency][ProfileModeDebug] component unmounted", unmountedValue);
-      void debugProfileModeSelection("component_unmounted", unmountedValue).catch((error) => {
-        console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-      });
-    };
-  }, [profileModeDebugInstance]);
-
-  useEffect(() => {
-    if (profileModeDebug === "等待选择") return;
-    const value = `${profileModeDebugInstance}:${profileModeDebug}`;
-    console.info("[ClawGPUFrequency][ProfileModeDebug] debug state committed", value);
-    void debugProfileModeSelection("debug_state_committed", value).catch((error) => {
-      console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-    });
-  }, [profileModeDebug, profileModeDebugInstance]);
-
-  useEffect(() => {
-    if (previousProfileMode.current === profileMode) return;
-    previousProfileMode.current = profileMode;
-    const value = String(profileMode);
-    console.info("[ClawGPUFrequency][ProfileModeDebug] state committed", value);
-    setProfileModeDebug(`状态已更新：${value}`);
-    void debugProfileModeSelection("state_committed", value).catch((error) => {
-      console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-    });
-  }, [profileMode]);
 
   useEffect(() => {
     let mounted = true;
@@ -384,6 +375,25 @@ function GPUFrequencyPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    if (busy || profileMode === "customize" || !activeGame) return;
+    const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
+    if (!profiles || profiles.supported === false) return;
+    const profile = profiles.profiles?.[profileMode];
+    if (!profile) {
+      setProfileMode("customize");
+      saveProfileModePreference("customize");
+      setMessage(`尚未保存${profileModeLabel(profileMode)} Profile；当前处于 Customize`);
+      return;
+    }
+    if (!state || !powerState || !cpuState) return;
+    if (!profileMatchesCurrentSettings(profile, state, powerState, cpuState)) {
+      setProfileMode("customize");
+      saveProfileModePreference("customize");
+      setMessage(`当前设置与${profileModeLabel(profileMode)} Profile 不一致，已切换为 Customize`);
+    }
+  }, [activeGame?.appId, busy, cpuState, gameProfiles, powerState, profileMode, state]);
+
   const apply = async (action: () => Promise<GPUState>, successMessage: string) => {
     setBusy(true);
     setMessage("");
@@ -484,46 +494,50 @@ function GPUFrequencyPanel() {
     }
   };
 
-  const saveSelectedGameProfile = async () => {
-    if (!activeGame) return;
-    setBusy(true);
-    setMessage("");
-    try {
-      const next = await saveGameProfile(activeGame.appId, activeGame.name, profileMode);
-      if (next.supported === false) throw new Error(next.error ?? "无法保存游戏配置");
-      setGameProfiles(next);
-      setMessage(`已保存 ${activeGame.name} 的${profileModeLabel(profileMode)}配置`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
-    }
+  const syncAppliedProfileState = (next: GameProfileApplyResult) => {
+    setState(next.gpuState);
+    setPowerState(next.packagePowerState);
+    setCPUState(next.cpuState);
+    setTargetMhz(
+      next.gpuState.minFreqMhz === next.gpuState.maxFreqMhz
+        ? next.gpuState.minFreqMhz ?? null
+        : next.gpuState.maxFreqMhz ?? null,
+    );
+    setTargetTdpW(next.packagePowerState.currentTdpW ?? null);
+    setTargetPCoreCount(next.cpuState.pCoreCount ?? null);
+    setTargetECoreCount(next.cpuState.eCoreCount ?? null);
+    setTargetPCoreFrequencyMhz(next.cpuState.pCoreFrequencyTargetMhz ?? null);
+    setTargetECoreFrequencyMhz(next.cpuState.eCoreFrequencyTargetMhz ?? null);
+    targetInitialized.current = true;
+    powerTargetInitialized.current = true;
+    coreTargetsInitialized.current = true;
   };
 
-  const applySelectedGameProfile = async () => {
-    if (!activeGame || !gameProfiles?.profiles?.[profileMode]) return;
+  const selectProfileMode = async (mode: ProfileMode) => {
+    if (mode === "customize") {
+      setProfileMode(mode);
+      saveProfileModePreference(mode);
+      setMessage("当前为 Customize；可将当前设置覆盖到掌机或主机 Profile");
+      return;
+    }
+    if (!activeGame) return;
+    const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
+    if (!profiles || profiles.supported === false) return;
     const game = activeGame;
-    const mode = profileMode;
+    if (!profiles.profiles?.[mode]) {
+      setProfileMode("customize");
+      saveProfileModePreference("customize");
+      setMessage(`尚未保存${profileModeLabel(mode)} Profile；当前设置未更改，可在 Customize 中覆盖保存`);
+      return;
+    }
+
     setBusy(true);
     setMessage("");
     try {
       const next = await applyGameProfile(game.appId, mode);
-      setState(next.gpuState);
-      setPowerState(next.packagePowerState);
-      setCPUState(next.cpuState);
-      setTargetMhz(
-        next.gpuState.minFreqMhz === next.gpuState.maxFreqMhz
-          ? next.gpuState.minFreqMhz ?? null
-          : next.gpuState.maxFreqMhz ?? null,
-      );
-      setTargetTdpW(next.packagePowerState.currentTdpW ?? null);
-      setTargetPCoreCount(next.cpuState.pCoreCount ?? null);
-      setTargetECoreCount(next.cpuState.eCoreCount ?? null);
-      setTargetPCoreFrequencyMhz(next.cpuState.pCoreFrequencyTargetMhz ?? null);
-      setTargetECoreFrequencyMhz(next.cpuState.eCoreFrequencyTargetMhz ?? null);
-      targetInitialized.current = true;
-      powerTargetInitialized.current = true;
-      coreTargetsInitialized.current = true;
+      syncAppliedProfileState(next);
+      setProfileMode(mode);
+      saveProfileModePreference(mode);
       setMessage(`已应用 ${game.name} 的${profileModeLabel(mode)}配置：${next.applied.join("、")}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -532,9 +546,46 @@ function GPUFrequencyPanel() {
     }
   };
 
+  const overwriteGameProfile = async (mode: SavedProfileMode, game: ActiveGame) => {
+    setBusy(true);
+    setMessage("");
+    try {
+      const next = await saveGameProfile(game.appId, game.name, mode);
+      if (next.supported === false) throw new Error(next.error ?? "无法覆盖游戏配置");
+      setGameProfiles(next);
+      setProfileMode(mode);
+      saveProfileModePreference(mode);
+      setMessage(`已将当前设置保存到 ${game.name} 的${profileModeLabel(mode)} Profile`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmOverwriteGameProfile = (mode: SavedProfileMode) => {
+    if (!activeGame || profileMode !== "customize") return;
+    const game = activeGame;
+    const label = profileModeLabel(mode);
+    let modal: ReturnType<typeof showModal> | undefined;
+    modal = showModal(
+      <ConfirmModal
+        strTitle={`覆盖${label} Profile？`}
+        strDescription={`将用当前已生效设置覆盖 ${game.name} 的${label} Profile。原 Profile 内容会被替换。`}
+        strOKButtonText="确认覆盖"
+        strCancelButtonText="取消"
+        bDestructiveWarning
+        onCancel={() => modal?.Close()}
+        onOK={() => {
+          modal?.Close();
+          void overwriteGameProfile(mode, game);
+        }}
+      />,
+    );
+  };
+
   const supported = state?.supported === true;
   const currentGameProfiles = gameProfiles?.appId === activeGame?.appId ? gameProfiles : null;
-  const selectedProfile = currentGameProfiles?.profiles?.[profileMode] ?? null;
   const availableGovernors = cpuState?.availableGovernors ?? [];
   const governorToggleSupported = cpuState?.governorSupported === true
     && availableGovernors.includes("performance")
@@ -577,38 +628,17 @@ function GPUFrequencyPanel() {
           rgOptions={[
             { data: "handheld", label: "掌机模式" },
             { data: "docked", label: "主机模式" },
+            { data: "customize", label: "Customize" },
           ]}
           selectedOption={profileMode}
-          disabled={busy}
+          disabled={busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false}
           onChange={(option) => {
             const selectedMode = option?.data;
-            const value = String(selectedMode);
-            console.info("[ClawGPUFrequency][ProfileModeDebug] dropdown onChange", option);
-            setProfileModeDebug(`回调已触发：${value}`);
-            void debugProfileModeSelection("dropdown_on_change", value).catch((error) => {
-              console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-            });
-            if (selectedMode !== "handheld" && selectedMode !== "docked") {
-              setProfileModeDebug(`收到无效模式：${value}`);
-              return;
+            if (selectedMode === "handheld" || selectedMode === "docked" || selectedMode === "customize") {
+              void selectProfileMode(selectedMode);
             }
-            const saved = saveProfileModePreference(selectedMode);
-            console.info(
-              "[ClawGPUFrequency][ProfileModeDebug] dispatching state updates",
-              `${profileModeDebugInstance}:${value}:stored=${saved}`,
-            );
-            setProfileMode(selectedMode);
-            void debugProfileModeSelection(
-              "state_update_dispatched",
-              `${profileModeDebugInstance}:${value}:stored=${saved}`,
-            ).catch((error) => {
-              console.warn("[ClawGPUFrequency][ProfileModeDebug] backend log failed", error);
-            });
           }}
         />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <div>调试：{profileModeDebug}</div>
       </PanelSectionRow>
       <PanelSectionRow>
         <div>
@@ -629,24 +659,28 @@ function GPUFrequencyPanel() {
           <div>{currentGameProfiles.error ?? "游戏 Profile 存储不可用"}</div>
         </PanelSectionRow>
       )}
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          disabled={busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false}
-          onClick={() => void saveSelectedGameProfile()}
-        >
-          保存当前已生效设置为{profileModeLabel(profileMode)} Profile
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem
-          layout="below"
-          disabled={busy || !activeGame || !selectedProfile || currentGameProfiles?.supported === false}
-          onClick={() => void applySelectedGameProfile()}
-        >
-          应用{profileModeLabel(profileMode)} Profile
-        </ButtonItem>
-      </PanelSectionRow>
+      {profileMode === "customize" && (
+        <>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false}
+              onClick={() => confirmOverwriteGameProfile("handheld")}
+            >
+              覆盖掌机模式 Profile
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              disabled={busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false}
+              onClick={() => confirmOverwriteGameProfile("docked")}
+            >
+              覆盖主机模式 Profile
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
+      )}
 
       {supported ? (
         <>
