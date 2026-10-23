@@ -25,6 +25,12 @@ from gpu_control import (
     set_package_tdp,
     set_fixed_frequency,
 )
+from profile_control import (
+    ProfileControlError,
+    apply_game_profile as apply_saved_game_profile,
+    get_game_profiles as read_game_profiles,
+    save_game_profile as save_current_game_profile,
+)
 
 
 class Plugin:
@@ -69,6 +75,25 @@ class Plugin:
 
     async def set_package_tdp(self, power_watts: int):
         return set_package_tdp(power_watts)
+
+    async def get_game_profiles(self, app_id: int):
+        try:
+            return read_game_profiles(app_id)
+        except ProfileControlError as exc:
+            return {"supported": False, "appId": app_id, "error": str(exc)}
+
+    async def save_game_profile(self, app_id: int, game_name: str, mode: str):
+        return save_current_game_profile(app_id, game_name, mode)
+
+    async def apply_game_profile(self, app_id: int, mode: str):
+        return apply_saved_game_profile(app_id, mode)
+
+    async def debug_profile_mode_selection(self, event: str, value: str):
+        decky_plugin.logger.info(
+            "[ProfileModeDebug] event=%r value=%r",
+            str(event)[:80],
+            str(value)[:120],
+        )
 
     async def _main(self):
         decky_plugin.logger.info("Claw GPU Frequency loaded; no hardware values changed.")
