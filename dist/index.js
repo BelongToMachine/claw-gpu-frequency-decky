@@ -200,6 +200,7 @@ function GPUFrequencyPanel() {
     const targetInitialized = SP_REACT.useRef(false);
     const powerTargetInitialized = SP_REACT.useRef(false);
     const coreTargetsInitialized = SP_REACT.useRef(false);
+    const reconciledProfileAppId = SP_REACT.useRef(null);
     SP_REACT.useEffect(() => {
         let mounted = true;
         const detectActiveGame = () => {
@@ -323,10 +324,15 @@ function GPUFrequencyPanel() {
         };
     }, []);
     SP_REACT.useEffect(() => {
-        if (busy || profileMode === "customize" || !activeGame)
+        if (busy || !activeGame || reconciledProfileAppId.current === activeGame.appId)
             return;
         const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
         if (!profiles || profiles.supported === false)
+            return;
+        if (!state || !powerState || !cpuState)
+            return;
+        reconciledProfileAppId.current = activeGame.appId;
+        if (profileMode === "customize")
             return;
         const profile = profiles.profiles?.[profileMode];
         if (!profile) {
@@ -335,20 +341,29 @@ function GPUFrequencyPanel() {
             setMessage(`尚未保存${profileModeLabel(profileMode)} Profile；当前处于 Customize`);
             return;
         }
-        if (!state || !powerState || !cpuState)
-            return;
         if (!profileMatchesCurrentSettings(profile, state, powerState, cpuState)) {
             setProfileMode("customize");
             saveProfileModePreference("customize");
             setMessage(`当前设置与${profileModeLabel(profileMode)} Profile 不一致，已切换为 Customize`);
         }
     }, [activeGame?.appId, busy, cpuState, gameProfiles, powerState, profileMode, state]);
+    const markProfileModeCustomize = (nextGPU = state, nextPower = powerState, nextCPU = cpuState) => {
+        if (profileMode === "customize" || !activeGame || !nextGPU || !nextPower || !nextCPU)
+            return;
+        const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
+        const profile = profiles?.profiles?.[profileMode];
+        if (profile && !profileMatchesCurrentSettings(profile, nextGPU, nextPower, nextCPU)) {
+            setProfileMode("customize");
+            saveProfileModePreference("customize");
+        }
+    };
     const apply = async (action, successMessage) => {
         setBusy(true);
         setMessage("");
         try {
             const next = await action();
             setState(next);
+            markProfileModeCustomize(next, powerState, cpuState);
             if (next.supported) {
                 const nextTarget = next.minFreqMhz === next.maxFreqMhz
                     ? next.minFreqMhz
@@ -373,6 +388,7 @@ function GPUFrequencyPanel() {
         try {
             const next = await setPackageTDP(targetTdpW);
             setPowerState(next);
+            markProfileModeCustomize(state, next, cpuState);
             setTargetTdpW(next.currentTdpW ?? targetTdpW);
             setMessage(`MSR + MMIO 的 PL1/PL2 已同步为 ${next.currentTdpW ?? targetTdpW} W`);
         }
@@ -389,6 +405,7 @@ function GPUFrequencyPanel() {
         try {
             const next = await action();
             setCPUState(next);
+            markProfileModeCustomize(state, powerState, next);
             setMessage(successMessage);
         }
         catch (error) {
@@ -406,6 +423,7 @@ function GPUFrequencyPanel() {
         try {
             const next = await setCPUCoreCounts(targetPCoreCount, targetECoreCount);
             setCPUState(next);
+            markProfileModeCustomize(state, powerState, next);
             setTargetPCoreCount(next.pCoreCount ?? targetPCoreCount);
             setTargetECoreCount(next.eCoreCount ?? targetECoreCount);
             if (next.pCoreFrequencyTargetMhz != null) {
@@ -432,6 +450,7 @@ function GPUFrequencyPanel() {
         try {
             const next = await setCPUClusterFrequencyLimit(coreType, frequencyMhz);
             setCPUState(next);
+            markProfileModeCustomize(state, powerState, next);
             const activePolicies = coreType === "p"
                 ? next.pCoreFrequencyOnlinePolicies ?? 0
                 : next.eCoreFrequencyOnlinePolicies ?? 0;
@@ -463,12 +482,6 @@ function GPUFrequencyPanel() {
         coreTargetsInitialized.current = true;
     };
     const selectProfileMode = async (mode) => {
-        if (mode === "customize") {
-            setProfileMode(mode);
-            saveProfileModePreference(mode);
-            setMessage("当前为 Customize；可将当前设置覆盖到掌机或主机 Profile");
-            return;
-        }
         if (!activeGame)
             return;
         const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
@@ -481,16 +494,20 @@ function GPUFrequencyPanel() {
             setMessage(`尚未保存${profileModeLabel(mode)} Profile；当前设置未更改，可在 Customize 中覆盖保存`);
             return;
         }
+        const previousMode = profileMode;
+        setProfileMode(mode);
+        saveProfileModePreference(mode);
         setBusy(true);
         setMessage("");
         try {
             const next = await applyGameProfile(game.appId, mode);
             syncAppliedProfileState(next);
-            setProfileMode(mode);
-            saveProfileModePreference(mode);
+            reconciledProfileAppId.current = game.appId;
             setMessage(`已应用 ${game.name} 的${profileModeLabel(mode)}配置：${next.applied.join("、")}`);
         }
         catch (error) {
+            setProfileMode(previousMode);
+            saveProfileModePreference(previousMode);
             setMessage(error instanceof Error ? error.message : String(error));
         }
         finally {
@@ -507,6 +524,7 @@ function GPUFrequencyPanel() {
             setGameProfiles(next);
             setProfileMode(mode);
             saveProfileModePreference(mode);
+            reconciledProfileAppId.current = game.appId;
             setMessage(`已将当前设置保存到 ${game.name} 的${profileModeLabel(mode)} Profile`);
         }
         catch (error) {
@@ -552,10 +570,9 @@ function GPUFrequencyPanel() {
                         : "未检测到运行中的 Steam 游戏" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.DropdownItem, { label: "\u914D\u7F6E\u6A21\u5F0F", description: profileModeLabel(profileMode), rgOptions: [
                         { data: "handheld", label: "掌机模式" },
                         { data: "docked", label: "主机模式" },
-                        { data: "customize", label: "Customize" },
                     ], selectedOption: profileMode, disabled: busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false, onChange: (option) => {
                         const selectedMode = option?.data;
-                        if (selectedMode === "handheld" || selectedMode === "docked" || selectedMode === "customize") {
+                        if (selectedMode === "handheld" || selectedMode === "docked") {
                             void selectProfileMode(selectedMode);
                         }
                     } }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["\u638C\u673A\uFF1A", activeGame && !currentGameProfiles

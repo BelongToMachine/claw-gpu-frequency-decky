@@ -244,6 +244,7 @@ function GPUFrequencyPanel() {
   const targetInitialized = useRef(false);
   const powerTargetInitialized = useRef(false);
   const coreTargetsInitialized = useRef(false);
+  const reconciledProfileAppId = useRef<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -376,9 +377,12 @@ function GPUFrequencyPanel() {
   }, []);
 
   useEffect(() => {
-    if (busy || profileMode === "customize" || !activeGame) return;
+    if (busy || !activeGame || reconciledProfileAppId.current === activeGame.appId) return;
     const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
     if (!profiles || profiles.supported === false) return;
+    if (!state || !powerState || !cpuState) return;
+    reconciledProfileAppId.current = activeGame.appId;
+    if (profileMode === "customize") return;
     const profile = profiles.profiles?.[profileMode];
     if (!profile) {
       setProfileMode("customize");
@@ -386,7 +390,6 @@ function GPUFrequencyPanel() {
       setMessage(`尚未保存${profileModeLabel(profileMode)} Profile；当前处于 Customize`);
       return;
     }
-    if (!state || !powerState || !cpuState) return;
     if (!profileMatchesCurrentSettings(profile, state, powerState, cpuState)) {
       setProfileMode("customize");
       saveProfileModePreference("customize");
@@ -394,12 +397,27 @@ function GPUFrequencyPanel() {
     }
   }, [activeGame?.appId, busy, cpuState, gameProfiles, powerState, profileMode, state]);
 
+  const markProfileModeCustomize = (
+    nextGPU: GPUState | null = state,
+    nextPower: PackagePowerState | null = powerState,
+    nextCPU: CPUControlState | null = cpuState,
+  ) => {
+    if (profileMode === "customize" || !activeGame || !nextGPU || !nextPower || !nextCPU) return;
+    const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
+    const profile = profiles?.profiles?.[profileMode];
+    if (profile && !profileMatchesCurrentSettings(profile, nextGPU, nextPower, nextCPU)) {
+      setProfileMode("customize");
+      saveProfileModePreference("customize");
+    }
+  };
+
   const apply = async (action: () => Promise<GPUState>, successMessage: string) => {
     setBusy(true);
     setMessage("");
     try {
       const next = await action();
       setState(next);
+      markProfileModeCustomize(next, powerState, cpuState);
       if (next.supported) {
         const nextTarget = next.minFreqMhz === next.maxFreqMhz
           ? next.minFreqMhz
@@ -422,6 +440,7 @@ function GPUFrequencyPanel() {
     try {
       const next = await setPackageTDP(targetTdpW);
       setPowerState(next);
+      markProfileModeCustomize(state, next, cpuState);
       setTargetTdpW(next.currentTdpW ?? targetTdpW);
       setMessage(`MSR + MMIO 的 PL1/PL2 已同步为 ${next.currentTdpW ?? targetTdpW} W`);
     } catch (error) {
@@ -440,6 +459,7 @@ function GPUFrequencyPanel() {
     try {
       const next = await action();
       setCPUState(next);
+      markProfileModeCustomize(state, powerState, next);
       setMessage(successMessage);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -455,6 +475,7 @@ function GPUFrequencyPanel() {
     try {
       const next = await setCPUCoreCounts(targetPCoreCount, targetECoreCount);
       setCPUState(next);
+      markProfileModeCustomize(state, powerState, next);
       setTargetPCoreCount(next.pCoreCount ?? targetPCoreCount);
       setTargetECoreCount(next.eCoreCount ?? targetECoreCount);
       if (next.pCoreFrequencyTargetMhz != null) {
@@ -479,6 +500,7 @@ function GPUFrequencyPanel() {
     try {
       const next = await setCPUClusterFrequencyLimit(coreType, frequencyMhz);
       setCPUState(next);
+      markProfileModeCustomize(state, powerState, next);
       const activePolicies = coreType === "p"
         ? next.pCoreFrequencyOnlinePolicies ?? 0
         : next.eCoreFrequencyOnlinePolicies ?? 0;
@@ -513,13 +535,7 @@ function GPUFrequencyPanel() {
     coreTargetsInitialized.current = true;
   };
 
-  const selectProfileMode = async (mode: ProfileMode) => {
-    if (mode === "customize") {
-      setProfileMode(mode);
-      saveProfileModePreference(mode);
-      setMessage("当前为 Customize；可将当前设置覆盖到掌机或主机 Profile");
-      return;
-    }
+  const selectProfileMode = async (mode: SavedProfileMode) => {
     if (!activeGame) return;
     const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
     if (!profiles || profiles.supported === false) return;
@@ -531,15 +547,19 @@ function GPUFrequencyPanel() {
       return;
     }
 
+    const previousMode = profileMode;
+    setProfileMode(mode);
+    saveProfileModePreference(mode);
     setBusy(true);
     setMessage("");
     try {
       const next = await applyGameProfile(game.appId, mode);
       syncAppliedProfileState(next);
-      setProfileMode(mode);
-      saveProfileModePreference(mode);
+      reconciledProfileAppId.current = game.appId;
       setMessage(`已应用 ${game.name} 的${profileModeLabel(mode)}配置：${next.applied.join("、")}`);
     } catch (error) {
+      setProfileMode(previousMode);
+      saveProfileModePreference(previousMode);
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -555,6 +575,7 @@ function GPUFrequencyPanel() {
       setGameProfiles(next);
       setProfileMode(mode);
       saveProfileModePreference(mode);
+      reconciledProfileAppId.current = game.appId;
       setMessage(`已将当前设置保存到 ${game.name} 的${profileModeLabel(mode)} Profile`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -628,13 +649,12 @@ function GPUFrequencyPanel() {
           rgOptions={[
             { data: "handheld", label: "掌机模式" },
             { data: "docked", label: "主机模式" },
-            { data: "customize", label: "Customize" },
           ]}
           selectedOption={profileMode}
           disabled={busy || !activeGame || !currentGameProfiles || currentGameProfiles.supported === false}
           onChange={(option) => {
             const selectedMode = option?.data;
-            if (selectedMode === "handheld" || selectedMode === "docked" || selectedMode === "customize") {
+            if (selectedMode === "handheld" || selectedMode === "docked") {
               void selectProfileMode(selectedMode);
             }
           }}
