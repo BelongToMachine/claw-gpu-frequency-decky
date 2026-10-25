@@ -34,7 +34,9 @@ The interface uses Decky's built-in panel, slider, button, toggle, and dropdown 
 - **Game profiles** save the current GPU frequency mode, package TDP, CPU Boost,
   SMT, P/E core counts, P/E frequency limits, and governor per Steam app ID.
   Each game has separate **Handheld** and **Docked** slots. The active Steam game
-  is detected automatically; selecting a saved slot applies it immediately.
+  is detected automatically; selecting a saved slot applies it immediately, and
+  the plugin remembers the last applied mode separately for each game. When the
+  panel detects a game with a saved profile, it restores that game's last mode.
   When the live controls differ from that slot, the mode changes to **Customize**;
   the current settings can then overwrite either slot after confirmation.
 - The GPU's actual clock, driver and firmware requests, live limits, and available
@@ -45,9 +47,9 @@ values only after their apply buttons are selected. CPU toggles apply
 immediately; core count sliders apply after **应用核心数量**, and frequency
 limits apply after their P-core or E-core button. The TDP slider adjusts the CPU
 and GPU's shared package power budget; it is not a direct GPU frequency control.
-Selecting a saved game profile writes its controls to the device; launching a
-game by itself does not change hardware settings. Overwriting a profile stores
-the current applied controls for the selected game and mode.
+Selecting a saved game profile writes its controls to the device. Overwriting a
+profile stores the current controls and remembers that mode for the selected
+game.
 All CPU and package power controls refuse to write unless the system identifies
 as an MSI Claw A1M. GPU frequency control additionally requires one Intel i915
 GT0 frequency interface. Actual GPU clock speed can still be lower than

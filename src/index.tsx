@@ -115,6 +115,7 @@ type GameProfilesState = {
   error?: string;
   appId?: number;
   gameName?: string;
+  lastMode?: SavedProfileMode | null;
   profiles?: Record<SavedProfileMode, SavedGameProfile | null>;
 };
 
@@ -244,7 +245,7 @@ function GPUFrequencyPanel() {
   const targetInitialized = useRef(false);
   const powerTargetInitialized = useRef(false);
   const coreTargetsInitialized = useRef(false);
-  const reconciledProfileAppId = useRef<number | null>(null);
+  const restoredProfileAppId = useRef<number | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -377,25 +378,52 @@ function GPUFrequencyPanel() {
   }, []);
 
   useEffect(() => {
-    if (busy || !activeGame || reconciledProfileAppId.current === activeGame.appId) return;
+    if (!activeGame) {
+      restoredProfileAppId.current = null;
+      return;
+    }
+    if (busy || restoredProfileAppId.current === activeGame.appId) return;
     const profiles = gameProfiles?.appId === activeGame.appId ? gameProfiles : null;
     if (!profiles || profiles.supported === false) return;
     if (!state || !powerState || !cpuState) return;
-    reconciledProfileAppId.current = activeGame.appId;
-    if (profileMode === "customize") return;
-    const profile = profiles.profiles?.[profileMode];
-    if (!profile) {
-      setProfileMode("customize");
-      saveProfileModePreference("customize");
-      setMessage(`尚未保存${profileModeLabel(profileMode)} Profile；当前处于 Customize`);
+
+    const savedModes = (Object.keys(profiles.profiles ?? {}) as SavedProfileMode[])
+      .filter((mode) => Boolean(profiles.profiles?.[mode]));
+    if (savedModes.length === 0) {
+      restoredProfileAppId.current = activeGame.appId;
       return;
     }
-    if (!profileMatchesCurrentSettings(profile, state, powerState, cpuState)) {
-      setProfileMode("customize");
-      saveProfileModePreference("customize");
-      setMessage(`当前设置与${profileModeLabel(profileMode)} Profile 不一致，已切换为 Customize`);
-    }
-  }, [activeGame?.appId, busy, cpuState, gameProfiles, powerState, profileMode, state]);
+
+    const liveMatches = savedModes.filter((mode) => {
+      const profile = profiles.profiles?.[mode];
+      return profile && profileMatchesCurrentSettings(profile, state, powerState, cpuState);
+    });
+    const preferredMode = profiles.lastMode && savedModes.includes(profiles.lastMode)
+      ? profiles.lastMode
+      : profileMode !== "customize" && savedModes.includes(profileMode)
+        ? profileMode
+        : liveMatches.length === 1
+          ? liveMatches[0]
+          : savedModes.includes("handheld")
+            ? "handheld"
+            : "docked";
+
+    restoredProfileAppId.current = activeGame.appId;
+    setProfileMode(preferredMode);
+    saveProfileModePreference(preferredMode);
+    setBusy(true);
+    setMessage("");
+    const game = activeGame;
+    void applyGameProfile(game.appId, preferredMode)
+      .then((next) => {
+        syncAppliedProfileState(next);
+        setMessage(`已恢复 ${game.name} 上次的${profileModeLabel(preferredMode)}配置：${next.applied.join("、")}`);
+      })
+      .catch((error) => {
+        setMessage(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setBusy(false));
+  }, [activeGame, busy, cpuState, gameProfiles, powerState, profileMode, state]);
 
   const markProfileModeCustomize = (
     nextGPU: GPUState | null = state,
@@ -555,7 +583,7 @@ function GPUFrequencyPanel() {
     try {
       const next = await applyGameProfile(game.appId, mode);
       syncAppliedProfileState(next);
-      reconciledProfileAppId.current = game.appId;
+      restoredProfileAppId.current = game.appId;
       setMessage(`已应用 ${game.name} 的${profileModeLabel(mode)}配置：${next.applied.join("、")}`);
     } catch (error) {
       setProfileMode(previousMode);
@@ -575,7 +603,7 @@ function GPUFrequencyPanel() {
       setGameProfiles(next);
       setProfileMode(mode);
       saveProfileModePreference(mode);
-      reconciledProfileAppId.current = game.appId;
+      restoredProfileAppId.current = game.appId;
       setMessage(`已将当前设置保存到 ${game.name} 的${profileModeLabel(mode)} Profile`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));

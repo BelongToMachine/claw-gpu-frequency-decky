@@ -100,8 +100,21 @@ def _public_game_profiles(app_id: int) -> Dict[str, Any]:
     return {
         "appId": app_id,
         "gameName": game.get("gameName", f"Steam app {app_id}") if isinstance(game, dict) else f"Steam app {app_id}",
+        "lastMode": game.get("lastMode") if isinstance(game, dict) and game.get("lastMode") in PROFILE_MODES else None,
         "profiles": profiles,
     }
+
+
+def _store_last_mode(app_id: int, mode: str) -> None:
+    """Remember the last successfully applied or saved mode for one game."""
+    store = _load_store()
+    game_key = str(app_id)
+    game = store["games"].get(game_key)
+    if not isinstance(game, dict):
+        game = {"profiles": {}}
+    game["lastMode"] = mode
+    store["games"][game_key] = game
+    _save_store(store)
 
 
 def get_game_profiles(app_id: int) -> Dict[str, Any]:
@@ -181,6 +194,7 @@ def save_game_profile(app_id: int, game_name: str, mode: str) -> Dict[str, Any]:
     profiles[normalized_mode] = profile
     game["gameName"] = normalized_name
     game["profiles"] = profiles
+    game["lastMode"] = normalized_mode
     store["games"][game_key] = game
     _save_store(store)
     return _public_game_profiles(normalized_app_id)
@@ -272,9 +286,11 @@ def apply_game_profile(app_id: int, mode: str) -> Dict[str, Any]:
     else:
         run("GPU frequency", lambda: set_fixed_frequency(gpu["frequencyMhz"]))
 
-    return {
+    result = {
         "applied": applied,
         "gpuState": get_gpu_state(),
         "packagePowerState": get_package_power_state(),
         "cpuState": get_cpu_control_state(),
     }
+    _store_last_mode(normalized_app_id, normalized_mode)
+    return result
